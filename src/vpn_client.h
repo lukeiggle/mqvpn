@@ -52,6 +52,7 @@ typedef struct mqvpn_client_cfg_s {
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
     int tun_offload;              /* [Advanced] TunOffload; default 1 */
     int tun_gro;                  /* [Advanced] TunGro; default 1 */
+    int xquic_quiet_stream_reset; /* [Advanced] XquicQuietStreamReset; default 0 */
 } mqvpn_client_cfg_t;
 
 /* CLI → library config bridge (src/platform/client_config_bridge.c): forwards

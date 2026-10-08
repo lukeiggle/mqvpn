@@ -391,8 +391,9 @@ In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tc
 | `UdpGro` | Lets the kernel hand over received packets in batches, lowering CPU use at high throughput. Automatically falls back to one-at-a-time receives on kernels without support (< 5.0). Linux only; no effect elsewhere. Set to `false` to restore the previous receive path | `true` |
 | `TunOffload` | Lets the kernel hand large batches of traffic to the tunnel interface in one read; mqvpn splits them, lowering CPU use at high throughput. Automatically falls back to one packet per read when the kernel does not support it. Linux only; no effect elsewhere. Set to `false` to restore the previous tunnel interface | `true` |
 | `TunGro` | Combines consecutive TCP packets, and consecutive UDP datagrams of the same size, headed for the tunnel interface into one larger write, lowering CPU use at high throughput. UDP datagrams are combined only on kernels 6.2 and later; older kernels keep writing them one at a time. No effect when `TunOffload` is `false`. Linux only; no effect elsewhere. Set to `false` to write packets one at a time as before | `true` |
+| `XquicQuietStreamReset` | Drops the two xquic log messages a hybrid TCP lane emits once for every normally reset request stream: the client's `xqc_stream_recv error\|-626` line and the server's per-request `xqc_h3_request_destroy` report when it says `close_msg:remote reset`. Every other xquic message still logs, including destroy reports for any other close reason. On a busy lane these two can be most of the log volume. A peer reset of the CONNECT-IP stream itself is hidden as well; the tunnel teardown that follows is still logged. Applies to client and server | `false` |
 
-In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`).
+In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`, `xquic_quiet_stream_reset`).
 
 ## MTU Guidelines
 

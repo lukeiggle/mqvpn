@@ -112,8 +112,9 @@ mqvpn_config_new(void)
     cfg->reconnect_interval_sec = 5;
     cfg->max_clients = 64;
     cfg->listen_port = 443;
-    cfg->init_max_path_id = 0; /* 0 = use xquic default (8) */
-    cfg->udp_gso = 1;          /* TX GSO/batch enabled by default */
+    cfg->init_max_path_id = 0;         /* 0 = use xquic default (8) */
+    cfg->udp_gso = 1;                  /* TX GSO/batch enabled by default */
+    cfg->xquic_quiet_stream_reset = 0; /* 0 = log every xquic message */
 
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
     mqvpn_reorder_config_default(&cfg->reorder);
@@ -782,6 +783,14 @@ mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->udp_gso = enabled ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_xquic_quiet_stream_reset(mqvpn_config_t *cfg, int on)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->xquic_quiet_stream_reset = on ? 1 : 0;
     return MQVPN_OK;
 }
 

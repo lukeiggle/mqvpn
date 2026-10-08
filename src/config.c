@@ -674,6 +674,9 @@ static const cfg_key_desc_t cfg_keys[] = {
     CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro),
     CFG_BOOL(SEC_ADVANCED, "TunOffload", "tun_offload", tun_offload),
     CFG_BOOL(SEC_ADVANCED, "TunGro", "tun_gro", tun_gro),
+    /* Default 0 from the memset: every xquic message is logged. */
+    CFG_BOOL(SEC_ADVANCED, "XquicQuietStreamReset", "xquic_quiet_stream_reset",
+             xquic_quiet_stream_reset),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller

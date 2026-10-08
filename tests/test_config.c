@@ -8,7 +8,8 @@
  *            -Isrc -Iinclude
  */
 #include "config.h"
-#include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
+#include "libmqvpn.h"       /* MQVPN_RECV_RATE_LIMIT_MAX */
+#include "mqvpn_internal.h" /* mqvpn_xqc_log_is_stream_reset_noise */
 #include "mqvpn_sched_names.h"
 #include "log.h"
 #include <stdio.h>
@@ -2145,7 +2146,8 @@ test_hybrid_recv_body_buf_max(void)
     rc = mqvpn_config_load(&cfg, p);
     unlink(p);
     ASSERT_EQ_INT(rc, 0, "RecvBodyBufMax in-range load ok");
-    ASSERT_EQ_ULL(cfg.hybrid.recv_body_buf_max, 8388608, "RecvBodyBufMax in-range stored");
+    ASSERT_EQ_ULL(cfg.hybrid.recv_body_buf_max, 8388608,
+                  "RecvBodyBufMax in-range stored");
 
     /* Exactly the ceiling is accepted. */
     p = write_tmp("[Hybrid]\nRecvBodyBufMax = 67108864\n");
@@ -2175,7 +2177,8 @@ test_hybrid_recv_body_buf_max(void)
 
     /* JSON: same key inside the bounded "hybrid" object. */
     mqvpn_config_defaults(&cfg);
-    rc = mqvpn_config_load_json_filecfg(&cfg, "{\"hybrid\":{\"recv_body_buf_max\":1048576}}");
+    rc = mqvpn_config_load_json_filecfg(&cfg,
+                                        "{\"hybrid\":{\"recv_body_buf_max\":1048576}}");
     ASSERT_EQ_INT(rc, 0, "RecvBodyBufMax json load ok");
     ASSERT_EQ_ULL(cfg.hybrid.recv_body_buf_max, 1048576, "RecvBodyBufMax json stored");
 }
@@ -2291,6 +2294,85 @@ test_advanced_tun_offload(void)
     unlink(p);
     ASSERT_EQ_INT(cfg.tun_offload, 0, "json tun_offload=false");
     ASSERT_EQ_INT(cfg.tun_gro, 0, "json tun_gro=false");
+}
+
+/* [Advanced] XquicQuietStreamReset: default off, the same boolean spellings
+ * as UdpGso/UdpGro beside it, JSON inside "advanced". */
+static void
+test_advanced_xquic_quiet_stream_reset(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.xquic_quiet_stream_reset, 0, "xquic_quiet_stream_reset default 0");
+
+    const char *spellings_on[] = {"true", "yes", "1"};
+    for (size_t i = 0; i < sizeof(spellings_on) / sizeof(spellings_on[0]); i++) {
+        char ini[128];
+        snprintf(ini, sizeof(ini), "[Advanced]\nXquicQuietStreamReset = %s\n",
+                 spellings_on[i]);
+        char *p = write_tmp(ini);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "XquicQuietStreamReset ini load ok");
+        unlink(p);
+        ASSERT_EQ_INT(cfg.xquic_quiet_stream_reset, 1, spellings_on[i]);
+    }
+
+    char *p = write_tmp("[Advanced]\nXquicQuietStreamReset = false\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "XquicQuietStreamReset false load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.xquic_quiet_stream_reset, 0, "ini XquicQuietStreamReset=false");
+
+    p = write_tmp("{\"advanced\": {\"xquic_quiet_stream_reset\": true}}");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced json load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.xquic_quiet_stream_reset, 1, "json xquic_quiet_stream_reset=true");
+}
+
+/* The substring filter behind [Advanced] XquicQuietStreamReset. Two exact
+ * messages, and nothing else: a filter that over-matches would delete the
+ * per-request reports a memory postmortem is reconstructed from. */
+static void
+test_xqc_log_stream_reset_noise(void)
+{
+    /* Client: the per-reset error line, as xquic formats it. */
+    const char *a = "|scid:0a1b|xqc_h3_stream_process_data|xqc_stream_recv error|-626|";
+    ASSERT_TRUE(mqvpn_xqc_log_is_stream_reset_noise(a, strlen(a)),
+                "client -626 filtered");
+
+    /* Server: the per-request destroy report for a peer-reset stream. */
+    const char *b = "|scid:0a1b|xqc_h3_request_destroy|stream_id:800388"
+                    "|close_msg:remote reset|err:0|rcvd_bdy_sz:0|snd_bdy_sz:12345|";
+    ASSERT_TRUE(mqvpn_xqc_log_is_stream_reset_noise(b, strlen(b)),
+                "server remote-reset destroy report filtered");
+
+    /* NOT filtered: a destroy report for a connection-close stream. */
+    const char *c = "|xqc_h3_request_destroy|stream_id:800388|close_msg:conn closed"
+                    "|err:0|rcvd_bdy_sz:0|snd_bdy_sz:3022709351|";
+    ASSERT_TRUE(!mqvpn_xqc_log_is_stream_reset_noise(c, strlen(c)),
+                "conn-closed destroy report kept");
+
+    /* NOT filtered: a different stream error code. */
+    const char *d = "|xqc_h3_stream_process_data|xqc_stream_recv error|-601|";
+    ASSERT_TRUE(!mqvpn_xqc_log_is_stream_reset_noise(d, strlen(d)), "other errno kept");
+
+    /* NOT filtered: an unrelated line that merely mentions a reset. */
+    const char *e = "|xqc_conn_destroy|close_msg:remote reset|";
+    ASSERT_TRUE(!mqvpn_xqc_log_is_stream_reset_noise(e, strlen(e)),
+                "non-request remote reset kept");
+
+    /* NULL / empty. */
+    ASSERT_TRUE(!mqvpn_xqc_log_is_stream_reset_noise(NULL, 10), "NULL buffer");
+    ASSERT_TRUE(!mqvpn_xqc_log_is_stream_reset_noise(a, 0), "empty buffer");
+
+    /* Bounds: the buffer handed to the log callback is NOT NUL-terminated,
+     * and a match must lie wholly inside `size`. */
+    char unterm[32];
+    memcpy(unterm, "|xqc_stream_recv error|-626|junk", 32);
+    ASSERT_TRUE(mqvpn_xqc_log_is_stream_reset_noise(unterm, 28), "exact-fit match");
+    ASSERT_TRUE(!mqvpn_xqc_log_is_stream_reset_noise(unterm, 27), "one short: no match");
+    ASSERT_TRUE(!mqvpn_xqc_log_is_stream_reset_noise(unterm, 5), "prefix only: no match");
 }
 
 /* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */
@@ -2984,6 +3066,8 @@ main(void)
     test_hybrid_recv_body_buf_max();
     test_advanced_recv_rate_limit();
     test_advanced_udp_gso();
+    test_advanced_xquic_quiet_stream_reset();
+    test_xqc_log_stream_reset_noise();
     test_advanced_udp_gro();
     test_advanced_tun_offload();
     test_hybrid_egress_acl_ini();

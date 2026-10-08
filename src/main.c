@@ -612,6 +612,8 @@ main(int argc, char *argv[])
             /* [Advanced] TunOffload / TunGro; default 1. Linux only. */
             .tun_offload = file_cfg.tun_offload,
             .tun_gro = file_cfg.tun_gro,
+            /* [Advanced] XquicQuietStreamReset; default 0. Client and server. */
+            .xquic_quiet_stream_reset = file_cfg.xquic_quiet_stream_reset,
         };
         memcpy(cfg.redundant_ports, redundant_ports,
                (size_t)n_redundant_ports * sizeof(redundant_ports[0]));
@@ -682,6 +684,8 @@ main(int argc, char *argv[])
             /* [Advanced] TunOffload / TunGro; default 1. Linux only. */
             .tun_offload = file_cfg.tun_offload,
             .tun_gro = file_cfg.tun_gro,
+            /* [Advanced] XquicQuietStreamReset; default 0. Client and server. */
+            .xquic_quiet_stream_reset = file_cfg.xquic_quiet_stream_reset,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

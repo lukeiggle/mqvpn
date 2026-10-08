@@ -59,4 +59,5 @@ mqvpn_platform_apply_client_config(mqvpn_config_t *lib_cfg, const mqvpn_client_c
     mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
     if (cfg->recv_rate_limit)
         mqvpn_config_set_recv_rate_limit(lib_cfg, cfg->recv_rate_limit);
+    mqvpn_config_set_xquic_quiet_stream_reset(lib_cfg, cfg->xquic_quiet_stream_reset);
 }

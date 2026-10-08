@@ -472,6 +472,12 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
 
     if (ml < s->log_level) return;
 
+    /* [Advanced] XquicQuietStreamReset — see the client twin. */
+    if (s->config.xquic_quiet_stream_reset &&
+        mqvpn_xqc_log_is_stream_reset_noise((const char *)buf, size)) {
+        return;
+    }
+
     char msg[512];
     snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
     s->cbs.log(ml, msg, s->user_ctx);

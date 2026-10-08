@@ -1132,6 +1132,14 @@ cb_xqc_log_write(xqc_log_level_t lvl, const void *buf, size_t size, void *user_d
     /* Early filter: skip snprintf for messages below configured level */
     if (ml < c->log_level) return;
 
+    /* [Advanced] XquicQuietStreamReset. Applied after the level filter and
+     * before the snprintf, so the common case costs one length-bounded scan
+     * of a short buffer and nothing else. */
+    if (c->config.xquic_quiet_stream_reset &&
+        mqvpn_xqc_log_is_stream_reset_noise((const char *)buf, size)) {
+        return;
+    }
+
     char msg[512];
     snprintf(msg, sizeof(msg), "[xquic] %.*s", (int)size, (const char *)buf);
     c->cbs.log(ml, msg, c->user_ctx);

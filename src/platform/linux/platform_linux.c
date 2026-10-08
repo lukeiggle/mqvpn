@@ -1198,6 +1198,7 @@ linux_platform_run_server(const mqvpn_server_cfg_t *cfg)
     mqvpn_config_apply_hybrid(lib_cfg, &cfg->hybrid); /* INI [Hybrid] bridge */
     /* Unconditional: 0 is a meaningful explicit-disable, not "unset". */
     mqvpn_config_set_udp_gso(lib_cfg, cfg->udp_gso);
+    mqvpn_config_set_xquic_quiet_stream_reset(lib_cfg, cfg->xquic_quiet_stream_reset);
 
     mqvpn_config_set_log_level(lib_cfg, (mqvpn_log_level_t)cfg->log_level);
 

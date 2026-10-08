@@ -123,6 +123,10 @@ typedef struct mqvpn_file_config_s {
      * platform-side. */
     int tun_offload;
     int tun_gro;
+    /* [Advanced] XquicQuietStreamReset -- drop the two xquic log messages a
+     * hybrid lane emits once per normally-reset request stream. 0 (default)
+     * = log everything, unchanged. Applies to both client and server. */
+    int xquic_quiet_stream_reset;
 
     /* Inferred mode: 1=server, 0=client */
     int is_server;

@@ -14,6 +14,8 @@
 #include "reorder.h"           /* mqvpn_reorder_config_t embedded in the builder config */
 #include "hybrid/classifier.h" /* mqvpn_hybrid_config_t embedded in the builder config */
 #include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
 
 /* ─── Constants ─── */
 /* MQVPN_MAX_PATHS and MQVPN_MAX_USERS are defined in libmqvpn.h */
@@ -188,7 +190,63 @@ struct mqvpn_config_s {
     uint64_t recv_rate_limit; /* 0 = off; client-only, see libmqvpn.h */
 
     int udp_gso; /* TX GSO/batch enable; default 1 */
+
+    /* [Advanced] XquicQuietStreamReset; default 0 (log everything). See
+     * mqvpn_xqc_log_is_stream_reset_noise below. */
+    int xquic_quiet_stream_reset;
 };
+
+/* ─── xquic log filtering ─── */
+
+/* memmem() over length-delimited, possibly non-NUL-terminated buffers.
+ * glibc has memmem(); other targets differ, and the haystack here is one
+ * short xquic log line, so a direct scan is both portable and fast enough. */
+static inline const void *
+mqvpn_memmem(const void *hay, size_t haylen, const void *needle, size_t needlelen)
+{
+    const unsigned char *h = (const unsigned char *)hay;
+    const unsigned char *n = (const unsigned char *)needle;
+    if (needlelen == 0) return hay;
+    if (!hay || !needle || haylen < needlelen) return NULL;
+    for (size_t i = 0; i + needlelen <= haylen; i++) {
+        if (h[i] == n[0] && memcmp(h + i, n, needlelen) == 0) return h + i;
+    }
+    return NULL;
+}
+
+/* True for exactly the two xquic log messages a hybrid TCP lane emits once
+ * per normally-reset request stream: the client's per-reset ERROR from
+ * xqc_h3_stream_process_data and the server's per-request
+ * xqc_h3_request_destroy REPORT for a stream the peer reset. On a busy lane
+ * they arrive at tens per second and dominate the log.
+ *
+ * Substring matching over a length-delimited, NON-NUL-terminated buffer,
+ * which is what xquic hands the log callback. Deliberately narrow:
+ *
+ *  - the client line is matched on the exact error code (-XQC_ESTREAM_RESET),
+ *    so a different stream error still logs;
+ *  - the server line is matched on close_msg:remote reset AND on the
+ *    emitting function, so xqc_h3_request_destroy reports for every other
+ *    close reason, "conn closed" above all, are untouched. Those carry the
+ *    per-request body sizes a memory postmortem is reconstructed from.
+ *
+ * Gated by [Advanced] XquicQuietStreamReset, default off: this hides real log
+ * output, so it is an operator decision, not a default. */
+static inline int
+mqvpn_xqc_log_is_stream_reset_noise(const char *buf, size_t size)
+{
+    static const char kRecvErr[] = "|xqc_stream_recv error|-626|";
+    static const char kDestroy[] = "|xqc_h3_request_destroy|";
+    static const char kRemoteReset[] = "|close_msg:remote reset|";
+
+    if (!buf || size == 0) return 0;
+    if (mqvpn_memmem(buf, size, kRecvErr, sizeof(kRecvErr) - 1)) return 1;
+    if (mqvpn_memmem(buf, size, kDestroy, sizeof(kDestroy) - 1) &&
+        mqvpn_memmem(buf, size, kRemoteReset, sizeof(kRemoteReset) - 1)) {
+        return 1;
+    }
+    return 0;
+}
 
 /* ─── State transition validation (M0-5) ─── */
 

@@ -49,6 +49,7 @@ typedef struct mqvpn_server_cfg_s {
     int udp_gro;                  /* [Advanced] UdpGro; default 1 */
     int tun_offload;              /* [Advanced] TunOffload; default 1 */
     int tun_gro;                  /* [Advanced] TunGro; default 1 */
+    int xquic_quiet_stream_reset; /* [Advanced] XquicQuietStreamReset; default 0 */
 } mqvpn_server_cfg_t;
 
 #endif /* MQVPN_VPN_SERVER_H */

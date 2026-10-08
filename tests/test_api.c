@@ -866,6 +866,20 @@ TEST(config_set_udp_gso)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_set_xquic_quiet_stream_reset)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_NOT_NULL(cfg);
+    ASSERT_EQ(cfg->xquic_quiet_stream_reset, 0); /* default off */
+    ASSERT_EQ(mqvpn_config_set_xquic_quiet_stream_reset(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_xquic_quiet_stream_reset(cfg, 5), MQVPN_OK);
+    ASSERT_EQ(cfg->xquic_quiet_stream_reset, 1); /* nonzero normalizes to 1 */
+    ASSERT_EQ(mqvpn_config_set_xquic_quiet_stream_reset(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->xquic_quiet_stream_reset, 0);
+
+    mqvpn_config_free(cfg);
+}
+
 /* ── Callback ABI tests ── */
 
 TEST(callbacks_abi_init)
@@ -4326,6 +4340,7 @@ main(void)
     run_config_set_multipath();
     run_config_set_hybrid();
     run_config_set_udp_gso();
+    run_config_set_xquic_quiet_stream_reset();
 
     /* ABI tests */
     run_callbacks_abi_init();

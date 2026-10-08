@@ -80,6 +80,7 @@ test_all_fields_forwarded(void)
     cfg.hybrid.enabled = 1;       /* spot-check: apply_hybrid ran */
     cfg.hybrid.tcp_max_flows = 77;
     cfg.recv_rate_limit = 123456;
+    cfg.xquic_quiet_stream_reset = 1;
     cfg.udp_gso = 0; /* platform-only knob: must NOT be bridged */
 
     mqvpn_config_t *lc = mqvpn_config_new();
@@ -118,6 +119,7 @@ test_all_fields_forwarded(void)
     ASSERT_EQ_INT(lc->hybrid.enabled, 1, "hybrid.enabled bridged");
     ASSERT_EQ_INT(lc->hybrid.tcp_max_flows, 77, "hybrid.tcp_max_flows bridged");
     ASSERT_EQ_INT(lc->recv_rate_limit, 123456, "recv_rate_limit");
+    ASSERT_EQ_INT(lc->xquic_quiet_stream_reset, 1, "xquic_quiet_stream_reset");
     /* udp_gso stays at the library default (1) — the bridge must not touch
      * it even though cfg.udp_gso is 0 (Linux-only knob, set at call site). */
     ASSERT_EQ_INT(lc->udp_gso, 1, "udp_gso NOT bridged");

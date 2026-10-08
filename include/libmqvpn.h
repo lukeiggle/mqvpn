@@ -833,6 +833,17 @@ MQVPN_API int mqvpn_config_set_recv_rate_limit(mqvpn_config_t *cfg,
  * value is stored as 1. */
 MQVPN_API int mqvpn_config_set_udp_gso(mqvpn_config_t *cfg, int enabled);
 
+/* [Advanced] XquicQuietStreamReset: suppress the two xquic log messages a
+ * hybrid TCP lane emits once per normally-reset request stream (the client's
+ * "xqc_stream_recv error|-626" line and the server's per-request destroy
+ * report for a peer-reset stream). Every other xquic message, including
+ * destroy reports for any other close reason, still logs. A peer reset of the
+ * CONNECT-IP request stream itself matches the server pattern as well and is
+ * hidden too; the tunnel teardown that follows is still logged by mqvpn. 0
+ * (default) logs everything. Hides real output, so it is opt-in. Any nonzero
+ * value is stored as 1. */
+MQVPN_API int mqvpn_config_set_xquic_quiet_stream_reset(mqvpn_config_t *cfg, int on);
+
 /* Clock injection (Android: CLOCK_BOOTTIME, testing: mock clock). xquic's
  * clock is process-wide: while a client or a server of the process runs,
  * mqvpn_client_new() fails for a client on another clock, and

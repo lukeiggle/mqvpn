@@ -255,6 +255,13 @@ ctrl_cmd_get_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *
     ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_flows_total", st.tcp_flows_total);
     ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_flows_rejected", st.tcp_flows_rejected);
     ok &= yyjson_mut_obj_add_uint(doc, root, "raw_markers_active", st.raw_markers_active);
+    /* Unconsumed H3 receive body held inside xquic, and the count of lane
+     * flows backpressured enough to be accumulating it. Read together: the
+     * second is the multiplier on the first's worst case ([Hybrid]
+     * RecvBodyBufMax times it). */
+    ok &= yyjson_mut_obj_add_uint(doc, root, "h3_recv_buffered_bytes",
+                                  st.h3_recv_buffered_bytes);
+    ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_flows_paused", st.tcp_flows_paused);
     /* udp_tx_* from the library (it issues those sends); udp_rx_* from the
      * platform's transport getter (RX offload never crosses the library
      * ABI). datagrams/sends and datagrams/receives are the achieved

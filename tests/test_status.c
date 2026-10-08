@@ -372,6 +372,7 @@ TEST(ctrl_query_rejects_reply_past_max)
     "{\"ok\":true,\"n_clients\":2,\"pkts_lane_tcp\":1,\"pkts_lane_dgram\":2,"  \
     "\"pkts_lane_raw\":3,\"pkts_lane_tcp_dropped\":4,\"tcp_flows_active\":5,"  \
     "\"tcp_flows_total\":6,\"tcp_flows_rejected\":7,\"raw_markers_active\":8," \
+    "\"h3_recv_buffered_bytes\":9,\"tcp_flows_paused\":11,"                    \
     "\"udp_tx_sends\":10,\"udp_tx_datagrams\":20,\"udp_rx_receives\":30,"      \
     "\"udp_rx_datagrams\":60}\n"
 #define BOB_CLIENT                                                                      \
@@ -406,7 +407,7 @@ TEST(run_status_prints_clients)
 
     ASSERT_EQ(rc, 0);
     ASSERT_STR_EQ(out, "server: lanes tcp/dgram/raw=1/2/3 (tcp_dropped=4) flows "
-                       "act/tot/rej=5/6/7 raw_markers=8\n"
+                       "act/tot/rej=5/6/7 raw_markers=8 h3_recv_buf=9 flows_paused=11\n"
                        "server: udp tx=20/10 (x2.00) rx=60/30 (x2.00)\n"
                        "mqvpn server  clients: 2\n"
                        "\nclient: al\"ice\n"
@@ -521,9 +522,10 @@ TEST(run_status_numeric_display_edges)
         "\"cwnd\":2048,\"state_label\":\"active\"}]}]}\n";
     const char *const big_status =
         "{\"ok\":true,\"n_clients\":2147483648,\"clients\":[]}\n";
-    const char *const stats_lines = "server: lanes tcp/dgram/raw=1/2/3 (tcp_dropped=4) "
-                                    "flows act/tot/rej=5/6/7 raw_markers=8\n"
-                                    "server: udp tx=20/10 (x2.00) rx=60/30 (x2.00)\n";
+    const char *const stats_lines =
+        "server: lanes tcp/dgram/raw=1/2/3 (tcp_dropped=4) "
+        "flows act/tot/rej=5/6/7 raw_markers=8 h3_recv_buf=9 flows_paused=11\n"
+        "server: udp tx=20/10 (x2.00) rx=60/30 (x2.00)\n";
 
     const char *const bodies[] = {STATS_BODY, neg_status};
     const size_t lens[] = {strlen(bodies[0]), strlen(bodies[1])};

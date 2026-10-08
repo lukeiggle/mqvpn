@@ -136,6 +136,66 @@ Aggregate worst case is that term times the flow count, plus the flat send-side 
 4096 ×   786,424 B = 3,221,192,704 B ≈ 3.0 GiB  (+ ≤73 MB send side)
 ```
 
+The second per-flow term is **HTTP/3 receive buffering**, and it is not an lwIP
+cost at all — it lives in xquic, above the lane. When `tcp_lane_downlink_drain`
+stops consuming `xqc_h3_request_recv_body` (lwIP sndbuf full, or `tcp_write`
+returned `ERR_MEM`), xquic keeps reading the transport stream into the
+request's `body_buf` list, because flow-control credit is released on that
+transport read and not on our consumption. The QUIC receive window bounds
+bytes *in flight*; it does not bound bytes *parked*. Unbounded, a single flow
+behind a slow LAN sink can park the whole response in client memory, however
+large, until the process is OOM-killed. The server's egress relay has the same
+shape in the upload direction.
+
+`[Hybrid] RecvBodyBufMax` (default `0` = off, unbounded) bounds it per request.
+At the mark xquic stops reading the request stream and so stops issuing
+credit; it resumes once the lane drains below half the mark. The overshoot is
+at most one 4 KiB transport read. The STREAM frames the peer had already been
+given credit for when the pause latched stay queued, unread, inside xquic, so
+they count as well; they are bounded by the stream receive window (xquic's
+compiled-in 16 MiB unless stream rate limiting lowers it). At 8 MiB, for
+example:
+
+```
+per flow  = RecvBodyBufMax
+          + one transport read of overshoot (4 KiB)
+          + unread STREAM frames (at most the stream receive window)
+          = 8,388,608 + 4,096 + 16,777,216 = 25,169,920 B ≈ 24.0 MiB
+aggregate = per flow × (flows simultaneously backpressured)
+```
+
+The multiplier is **not** `TcpMaxFlows` in practice, but `TcpMaxFlows` is the
+only hard bound available:
+
+```
+  256 × 25,169,920 B =   6,443,499,520 B ≈  6.0 GiB
+ 2048 × 25,169,920 B =  51,547,996,160 B ≈ 48.0 GiB
+ 4096 × 25,169,920 B = 103,095,992,320 B ≈ 96.0 GiB   (desktop/router ceiling)
+```
+
+On a router-class box with a few GB of RAM the larger figures are bounds that
+cannot be realised rather than budgets that have been provisioned. Three
+things keep them theoretical, and the third is the one that matters:
+
+1. A flow only accumulates while it is *backpressured* — its lwIP send buffer
+   full and the peer still pushing. A flow table is dominated by idle and
+   short flows, which hold nothing here.
+2. A cgroup memory limit on the service (systemd `MemoryMax=`) is the
+   enforcing backstop: a recurrence becomes an in-cgroup restart rather than a
+   box-wide thrash.
+3. `tcp_flows_paused` (client `[STATUS]`, server `get_stats`) is the measured
+   multiplier, and `h3_recv_buffered_bytes` beside it is the measured total.
+   Until the first is observed climbing into the hundreds, a per-connection
+   aggregate cap is a solution to a number nobody has seen; the gauges ship
+   first so that decision is made from data rather than from this arithmetic.
+
+Operators who need the hard bound to fit the box should lower `TcpMaxFlows` or
+`RecvBodyBufMax`, in that order — `TcpMaxFlows` also bounds the per-flow uplink
+term above, so it buys more per unit of reduction. A `RecvBodyBufMax` below
+the stream receive window lets an ordinary burst latch the pause, at some cost
+in throughput; one a few multiples above it engages only for a sink that has
+really fallen behind.
+
 ### 3a. Raising `TcpMaxFlows` toward the desktop/router ceiling
 
 The per-flow uplink term does not shrink as the cap grows, so the aggregate worst case
@@ -468,6 +528,15 @@ isolation (the shipped profile, §5c, applies both together):
   simultaneously saturated at `TCP_SND_BUF` before the shared segment pool is exhausted,
   after which `tcp_write` backpressure — not a config cap — limits further flows from fully
   using their send buffer concurrently.
+- **`RecvBodyBufMax` is per request, not per connection.** The aggregate H3
+  receive bound is the per-request value times the number of simultaneously
+  backpressured flows (§3), with no ceiling below `TcpMaxFlows`. A
+  connection-level aggregate cap would be the tighter shape; it is deliberately
+  not built until `tcp_flows_paused` shows a multiplier that warrants it.
+- **The QPACK blocked-buffer budget is separate.** `max_blocked_buf_per_stream`
+  / `max_blocked_buf_per_conn` (`xqc_h3_conn.h`) bound header data held while a
+  stream waits on dynamic-table insertions; `RecvBodyBufMax` does not apply to
+  that path and is not a substitute for it.
 - **Inbound demultiplexing is O(active flows)** — lwIP's `tcp_input` scans `tcp_active_pcbs`
   linearly with no hash. See §3a: this is the practical scaling wall at high flow counts,
   ahead of both the memory bound and the flow cap.

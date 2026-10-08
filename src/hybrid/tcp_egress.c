@@ -1396,3 +1396,20 @@ svr_tcp_egress_destroy_all(mqvpn_server_t *server)
         ef = next;
     }
 }
+
+/* See the docstring in tcp_egress.h. Read-only walk of the same list
+ * svr_tcp_egress_tick sweeps; called from get_stats, never on the data
+ * path. */
+uint64_t
+svr_tcp_egress_flows_paused(mqvpn_server_t *server)
+{
+    if (!server) return 0;
+
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(server, &ctx);
+    uint64_t n = 0;
+    for (const svr_tcp_egress_flow_t *ef = *ctx.flow_list_head; ef; ef = ef->next) {
+        if (ef->downlink_paused) n++;
+    }
+    return n;
+}

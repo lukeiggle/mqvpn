@@ -483,15 +483,16 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
                  * and the xquic-context driver (tcp_lane_downlink_pump_status's
                  * paused branch) only fires on a new READ_BODY/EMPTY_FIN
                  * notify — if the flow's own sndbuf is already empty (no
-                 * more ACKs coming) AND xquic's per-stream flow-control
-                 * window has filled (we stopped consuming recv_body, so
-                 * those notifies stopped too), NEITHER driver ever fires
-                 * again and the flow would stall holding its stash until
-                 * idle eviction (or forever with tcp_idle_timeout_sec == 0).
-                 * This 1 Hz sweep is the guaranteed third retry driver —
-                 * same retry-then-resume-drain idiom as the pump's paused
-                 * branch above (tcp_lane_downlink_pump_status,
-                 * ~line 699). */
+                 * more ACKs coming) AND no further READ_BODY notify arrives
+                 * (the request's body is fully drained, or, with [Hybrid]
+                 * RecvBodyBufMax set, xquic has paused reading this request
+                 * at the high-water and so stopped notifying), NEITHER
+                 * driver ever fires again and the flow would stall holding
+                 * its stash until idle eviction (or forever with
+                 * tcp_idle_timeout_sec == 0). This 1 Hz sweep is the
+                 * guaranteed third retry driver — same
+                 * retry-then-resume-drain idiom as the pump's paused branch
+                 * (tcp_lane_downlink_pump_status). */
                 tcp_lane_flow_status_t st = tcp_lane_downlink_stash_retry(f);
                 if (st == TCP_LANE_FLOW_LIVE && !f->downlink_paused &&
                     f->state == TCP_FLOW_ACTIVE && f->h3_request && f->pcb) {
@@ -548,6 +549,22 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
      * and can never leave the stats snapshot out of sync. */
     out->flows_active = lane->n_tcp_flows;
     out->raw_markers_active = lane->n_raw_markers;
+    /* Derived by walking, not tracked in parallel: downlink_paused is set
+     * and cleared at several points in the drain/retry path and flows are
+     * torn down from more, so a parallel counter would drift. get_stats is
+     * a status-timer call, never on the data path, so the walk's
+     * O(buckets + flows) cost is not measurable. */
+    out->flows_paused = 0;
+    for (uint32_t b = 0; b < lane->n_buckets; b++) {
+        for (const mqvpn_tcp_flow_t *f = lane->buckets[b]; f; f = f->next) {
+            /* CLOSING entries are routing residency only, never paused
+             * (tcp_lane_mark_closing); the state test keeps a stale flag
+             * from ever counting. */
+            if (f->state != TCP_FLOW_CLOSING && f->downlink_paused) {
+                out->flows_paused++;
+            }
+        }
+    }
 }
 
 uint32_t
@@ -810,20 +827,30 @@ tcp_lane_downlink_pump_status(mqvpn_tcp_lane_t *lane, void *stream)
         }
         if (f->downlink_paused) {
             /* Still not enough sndbuf room — this xquic-side notify alone
-             * can't force it open; wait for the next lwIP sent-notify. Not
-             * data loss: xquic's own per-stream flow control backpressures
-             * the server the same way the uplink's EAGAIN path does in the
-             * other direction. A FIN cannot be lost across the pause,
-             * in either shape: (a) fin still UNREAD in xquic's buffer at
-             * pause time — the resumed drain simply reaches it on a later
-             * recv call; (b) fin already READ, arriving ON the very chunk
-             * that got stashed (n>0 && fin) — the drain's stash path DOES
-             * discard that local fin flag (it breaks before the fin
-             * check), deliberately relying on recv's level-triggered
-             * re-report at the resumed drain (MQVPN_TCP_LANE_H3_RECV_*
-             * contract in tcp_lane.h: xquic re-reports *fin=1 on every
-             * call once the transport FIN arrived,
-             * xqc_h3_request.c:795-801). */
+             * can't force it open; wait for the next lwIP sent-notify.
+             *
+             * What this does NOT do is backpressure the peer by itself.
+             * xquic's per-stream flow control releases credit on its own
+             * TRANSPORT read (xqc_stream_recv advances next_read_offset and
+             * writes MAX_STREAM_DATA), not on our recv_body calls, so simply
+             * declining to drain leaves the server sending at full rate into
+             * xquic's body_buf, where one slow LAN sink can park the whole
+             * response in client heap. Backpressure exists only when
+             * [Hybrid] RecvBodyBufMax is set: xquic then stops reading this
+             * request's stream at the high-water, stops issuing credit, and
+             * the server blocks at the stream window. With it at 0 the
+             * buffering above this pause is unbounded.
+             *
+             * A FIN cannot be lost across the pause, in either shape:
+             * (a) fin still UNREAD in xquic's buffer at pause time — the
+             * resumed drain simply reaches it on a later recv call;
+             * (b) fin already READ, arriving ON the very chunk that got
+             * stashed (n>0 && fin) — the drain's stash path DOES discard
+             * that local fin flag (it breaks before the fin check),
+             * deliberately relying on recv's level-triggered re-report at
+             * the resumed drain (MQVPN_TCP_LANE_H3_RECV_* contract in
+             * tcp_lane.h: xquic re-reports *fin=1 on every call once the
+             * transport FIN arrived, xqc_h3_request_recv_body). */
             return TCP_LANE_FLOW_LIVE;
         }
         /* Stash flushed — fall through to resume draining recv_body below,

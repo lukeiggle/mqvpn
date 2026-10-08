@@ -4549,6 +4549,7 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
         out->tcp_flows_active = lane_stats.flows_active;
         out->tcp_flows_total = lane_stats.flows_total;
         out->raw_markers_active = lane_stats.raw_markers_active;
+        out->tcp_flows_paused = lane_stats.flows_paused;
     }
 #endif
 
@@ -4557,6 +4558,12 @@ mqvpn_client_get_stats(const mqvpn_client_t *c, mqvpn_stats_t *out)
         xqc_conn_stats_t xs = xqc_conn_get_stats(c->engine, &c->conn->cid);
         out->srtt_ms = (int)(xs.srtt / 1000);
         free(xs.paths_info);
+        /* Read from the H3 layer, not from xqc_conn_stats_t: the sum is
+         * owned by the H3 connection and xqc_conn_get_stats() runs below it.
+         * h3_conn is NULL until cb_h3_conn_create fires, and the accessor
+         * returns 0 for NULL. */
+        out->h3_recv_buffered_bytes =
+            xqc_h3_conn_get_recv_buffered_bytes(c->conn->h3_conn);
     }
     return MQVPN_OK;
 }

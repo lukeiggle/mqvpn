@@ -2805,8 +2805,25 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->tcp_flows_active = (uint64_t)s->tcp_egress_global_fd_count;
     out->tcp_flows_total = s->tcp_egress_flows_total_opened;
     out->tcp_flows_rejected = s->tcp_egress_flows_rejected_cap;
+    /* Gauge: egress flows whose downlink drain is withheld on send()-side
+     * backpressure. A read-only list walk; the cast drops const only to
+     * reach the shared ctx accessor. */
+    out->tcp_flows_paused = svr_tcp_egress_flows_paused((mqvpn_server_t *)s);
 #endif
     svr_tx_totals(s, &out->udp_tx_sends, &out->udp_tx_datagrams);
+
+    /* Unconsumed H3 receive body, summed over live sessions and read from the
+     * H3 layer (the transport stats have no view of it). Guard s->engine the
+     * same way the client-side get_stats guards c->engine: it is NULL before
+     * the engine is created and after it is torn down. */
+    if (s->engine) {
+        for (int i = 1; i <= MQVPN_ADDR_POOL_MAX; i++) {
+            svr_conn_t *conn = s->sessions[i];
+            if (!conn || !conn->tunnel_established) continue;
+            out->h3_recv_buffered_bytes +=
+                xqc_h3_conn_get_recv_buffered_bytes(conn->h3_conn);
+        }
+    }
     return MQVPN_OK;
 }
 

@@ -219,6 +219,7 @@ datagram counters and uptime.
   "pkts_lane_raw":0,"pkts_lane_tcp_dropped":0,
   "tcp_flows_active":1,"tcp_flows_total":7,
   "tcp_flows_rejected":2,"raw_markers_active":0,
+  "h3_recv_buffered_bytes":0,"tcp_flows_paused":0,
   "udp_tx_sends":54120,"udp_tx_datagrams":889304,
   "udp_rx_receives":812004,"udp_rx_datagrams":1031887,
   "uptime_sec":3601
@@ -242,6 +243,8 @@ datagram counters and uptime.
 | `tcp_flows_total`    | uint64 | Hybrid mode: cumulative TCP-lane flows opened since start (never decrements). Client: SYNs the flow table admitted. Server: egress flows admitted. |
 | `tcp_flows_rejected` | uint64 | Hybrid mode: cumulative flows refused by a cap. Client: SYNs rejected pre-lwIP (flow-table cap or alloc failure). Server: cap-503 rejections (whole-server fd-budget cap + per-session `TcpMaxFlows` cap; ACL 403s and 5xx syscall failures are not caps and are not counted). |
 | `raw_markers_active` | uint64 | Hybrid mode: sticky-RAW markers currently held in the client's TCP-lane flow table (5-tuples pinned to RAW under `tcp=auto`). Client-only; always 0 server-side. |
+| `h3_recv_buffered_bytes` | uint64 | Hybrid mode: HTTP/3 request body received from clients and held inside xquic, not yet consumed by the egress relay, summed over every live session. A gauge. Rises when an egress socket drains slower than the client uploads; with `[Hybrid] RecvBodyBufMax` set it plateaus near that value times `tcp_flows_paused`, and with it at `0` it is unbounded. |
+| `tcp_flows_paused` | uint64 | Hybrid mode: egress flows whose relay of the client's request body into the egress socket is currently withheld on `send()`-side backpressure. A gauge; the multiplier on `h3_recv_buffered_bytes`' worst case. |
 | `udp_tx_sends` | uint64 | Outer-UDP send syscalls that placed at least one datagram on the wire. |
 | `udp_tx_datagrams` | uint64 | Outer-UDP datagrams the kernel accepted. `udp_tx_datagrams / udp_tx_sends` is the achieved transmit batching factor; 1.0 means every datagram cost its own syscall. Exactly 1.0 with `UdpGso = false` and on platforms without the batched send path. |
 | `udp_rx_receives` | uint64 | Outer-UDP receive syscalls that returned data. |

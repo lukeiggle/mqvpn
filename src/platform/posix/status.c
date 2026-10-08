@@ -245,12 +245,15 @@ print_stats_summary(yyjson_val *root)
     uint64_t fl_rej = jget_u64(root, "tcp_flows_rejected");
     uint64_t lane_tcp_drop = jget_u64(root, "pkts_lane_tcp_dropped");
     uint64_t raw_markers = jget_u64(root, "raw_markers_active");
+    /* Absent on an older server: jget_u64 reads a missing key as 0. */
+    uint64_t h3_recv_buf = jget_u64(root, "h3_recv_buffered_bytes");
+    uint64_t fl_paused = jget_u64(root, "tcp_flows_paused");
 
     printf("server: lanes tcp/dgram/raw=%" PRIu64 "/%" PRIu64 "/%" PRIu64
            " (tcp_dropped=%" PRIu64 ") flows act/tot/rej=%" PRIu64 "/%" PRIu64 "/%" PRIu64
-           " raw_markers=%" PRIu64 "\n",
+           " raw_markers=%" PRIu64 " h3_recv_buf=%" PRIu64 " flows_paused=%" PRIu64 "\n",
            lane_tcp, lane_dgram, lane_raw, lane_tcp_drop, fl_act, fl_tot, fl_rej,
-           raw_markers);
+           raw_markers, h3_recv_buf, fl_paused);
 }
 
 /* ── Print the outer-UDP offload summary line ── */

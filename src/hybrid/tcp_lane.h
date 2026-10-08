@@ -150,6 +150,15 @@ typedef struct {
                                   * currently in the table — surfaced through
                                   * mqvpn_client_get_stats as the public
                                   * raw_markers_active stat */
+    uint64_t flows_paused;       /* gauge, same derivation: flows whose
+                                  * downlink drain is stopped on lwIP
+                                  * sndbuf/ERR_MEM backpressure
+                                  * (downlink_paused). This is the count that
+                                  * decides whether the aggregate H3 receive
+                                  * budget ([Hybrid] RecvBodyBufMax times
+                                  * this) is anywhere near its worst case —
+                                  * surfaced through mqvpn_client_get_stats as
+                                  * the public tcp_flows_paused stat. */
 } mqvpn_tcp_lane_stats_t;
 
 /* client_ctx is opaque to tcp_lane.c's callers outside mqvpn_client.c; it is
@@ -253,8 +262,12 @@ int mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream);
  * cli_stream_t* used by the functions above (flow located the same way).
  * No-ops (returns 0) on: unknown stream, CLOSING flow (dying, never
  * consumes recv_body), or a flow already paused on sndbuf backpressure
- * (deliberately not draining — xquic's per-stream flow control then
- * backpressures the server, mirroring the uplink's EAGAIN backpressure).
+ * (deliberately not draining). Not draining does NOT by itself backpressure
+ * the server: xquic releases flow-control credit on its own transport read,
+ * not on recv_body, so the response keeps arriving into xquic's per-request
+ * body buffer. The server is held back only when [Hybrid] RecvBodyBufMax is
+ * set, which makes xquic stop reading the stream at that high-water; with it
+ * at 0 the buffering above a paused flow is unbounded.
  * Also called from the sndbuf-recovered resume path (mqvpn_tcp_lane's own
  * lwIP sent callback) to continue draining after a pause. Returns 0 on
  * success/no-op, -1 if the flow is no longer live when this returns — either
@@ -335,7 +348,7 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  *
  * fin is LEVEL-TRIGGERED in xquic, not edge-triggered: once the transport
  * FIN has arrived, every subsequent recv call re-reports *fin=1
- * (xqc_h3_request.c:795-801 re-derives *fin from the request's sticky
+ * (xqc_h3_request_recv_body re-derives *fin from the request's sticky
  * fin_flag whenever body_buf_count == 0, and the n==0 && !*fin EAGAIN
  * guard therefore can never fire again after that point). A caller may
  * therefore stash a data+fin chunk, DROP the local fin flag, and rely on
@@ -343,7 +356,7 @@ int mqvpn_tcp_lane_downlink_pump(mqvpn_tcp_lane_t *lane, void *stream);
  * pump's stash/pause path depends on exactly this (see tcp_lane.c). The
  * only side effect of the repeated fin observation is a second
  * xqc_h3_request_end call, which is a harmless timestamp re-record
- * (xqc_h3_request.c:1055-1058: XQC_H3_REQUEST_RECORD_TIME of h3r_end_time,
+ * (xqc_h3_request_end: XQC_H3_REQUEST_RECORD_TIME of h3r_end_time,
  * nothing else). Test doubles for this function must model the re-report
  * or they will falsify the stash-then-resume fin path. */
 #define MQVPN_TCP_LANE_H3_RECV_AGAIN                                       \

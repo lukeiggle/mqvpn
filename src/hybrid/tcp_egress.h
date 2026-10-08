@@ -123,6 +123,14 @@ void svr_tcp_egress_flow_destroy(mqvpn_server_t *server, void *flow);
  * (no-op) and safe to call after normal shutdown has already emptied it. */
 void svr_tcp_egress_destroy_all(mqvpn_server_t *server);
 
+/* Count of egress flows currently withholding their downlink drain on
+ * send()-side backpressure (downlink_paused) — the server-side counterpart
+ * of the client lane's flows_paused. Derived by walking the flow list, the
+ * same way svr_tcp_egress_destroy_all and svr_tcp_egress_tick reach it; no
+ * parallel counter, so it cannot drift from the list it describes. Safe to
+ * call on an empty list (returns 0). */
+uint64_t svr_tcp_egress_flows_paused(mqvpn_server_t *server);
+
 /* Maps a connect()/SO_ERROR errno to the H3 :status this task sends back
  * over the CONNECT-TCP response stream. Exposed (not static) purely for
  * tests/test_tcp_egress.c's direct unit test — this is a pure function, no

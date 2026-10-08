@@ -94,6 +94,11 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->tcp_flows_total = 7;
     out->udp_tx_sends = 1234;
     out->udp_tx_datagrams = 5678;
+    /* Distinct from every value above and from g_uptime, so a get_stats
+     * body that swaps or duplicates them fails instead of coincidentally
+     * matching. */
+    out->h3_recv_buffered_bytes = 8388611;
+    out->tcp_flows_paused = 19;
     return 0;
 }
 
@@ -504,6 +509,10 @@ test_get_stats(void)
     CHECK_HAS("\"udp_tx_datagrams\":5678");
     CHECK_HAS("\"udp_rx_receives\":61");
     CHECK_HAS("\"udp_rx_datagrams\":83");
+    /* H3 receive buffering and its multiplier, added after
+     * raw_markers_active. */
+    CHECK_HAS("\"h3_recv_buffered_bytes\":8388611");
+    CHECK_HAS("\"tcp_flows_paused\":19");
 }
 
 /* ── get_status ───────────────────────────────────────────────────────────── */

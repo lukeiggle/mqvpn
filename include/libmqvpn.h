@@ -477,6 +477,22 @@ typedef struct {
      * control API reports them from there (see ctrl_socket_create). */
     uint64_t udp_tx_sends;
     uint64_t udp_tx_datagrams;
+
+    /* Unconsumed HTTP/3 receive body currently held inside xquic for this
+     * endpoint's connection(s), in bytes. Rises when a lane flow's local
+     * socket drains slower than the peer sends; plateaus at [Hybrid]
+     * RecvBodyBufMax times the number of backpressured flows once that key
+     * is set, and is unbounded when it is 0. Client: this connection.
+     * Server: summed over live sessions. Always 0 without hybrid mode.
+     * Appended at the end of the ABI, per the get_stats convention. */
+    uint64_t h3_recv_buffered_bytes;
+
+    /* Lane flows whose downlink drain is currently withheld on local-socket
+     * backpressure — the multiplier on h3_recv_buffered_bytes' worst case.
+     * Client: TCP-lane flows with downlink_paused (src/hybrid/tcp_lane.c).
+     * Server: egress flows with downlink_paused (src/hybrid/tcp_egress.c).
+     * A gauge, not a counter. */
+    uint64_t tcp_flows_paused;
 } mqvpn_stats_t;
 
 typedef struct {

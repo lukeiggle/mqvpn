@@ -168,6 +168,12 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
      * registration decision rather than any locally recomputed condition. */
     out->defer_send_flush = in->defer_send_flush ? 1 : 0;
 
+    /* Opt-in per-request H3 receive high-water. 0 (default) leaves xquic
+     * buffering unbounded, byte-for-byte today's behaviour; a straight
+     * pass-through, xquic owns the watermark and hysteresis. Set on BOTH
+     * endpoints -- each terminates one direction of the lane. */
+    out->h3_recv_body_buf_max = in->h3_recv_body_buf_max;
+
     /* --- congestion control ---
      * Invalid/out-of-range values fall back to BBR2, matching the old
      * `default:` case. Normalized up front so the switch can drop

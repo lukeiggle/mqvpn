@@ -2966,8 +2966,14 @@ cli_start_connection(mqvpn_client_t *c)
         /* set by init_xquic_engine, which runs in mqvpn_client_new() before
          * any cli_start_connection() — connect and reconnect alike */
         .defer_send_flush = (c->tx_batch != 0),
+        .h3_recv_body_buf_max = c->config.hybrid.recv_body_buf_max,
     };
     mqvpn_build_conn_settings(&cs_input, &cs);
+    /* Announce the cap once at startup, so an operator can confirm that each
+     * endpoint picked it up; the prefix is the same on client and server. */
+    if (cs.h3_recv_body_buf_max) {
+        LOG_I(c, "h3-recv-cap: %u bytes per request", cs.h3_recv_body_buf_max);
+    }
 
     if (c->config.reinjection == MQVPN_REINJ_DEADLINE) {
         /* Read back from the just-built cs, not the raw config: this

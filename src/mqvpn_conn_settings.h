@@ -62,6 +62,17 @@ typedef struct {
      * registration on — never a re-derived condition, which is what would let
      * them drift apart. */
     bool defer_send_flush;
+    /* h3_recv_body_buf_max: per-request high-water, in bytes, on HTTP/3 body
+     * read off the transport stream but not yet consumed by the application.
+     * 0 (default) = off, byte-for-byte unchanged behaviour. Passed straight
+     * through to xqc_conn_settings_t.h3_recv_body_buf_max.
+     *
+     * Not covered by the QUIC receive window: flow-control credit is
+     * released on xquic's TRANSPORT read, so the window bounds bytes in
+     * flight while this bounds bytes already read and parked. Meaningful
+     * only in hybrid mode -- a datagram-only tunnel opens no requests for
+     * this to act on. */
+    uint32_t h3_recv_body_buf_max;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins

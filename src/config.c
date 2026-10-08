@@ -558,6 +558,10 @@ cfgk_post_explicit_cap(mqvpn_file_config_t *cfg)
         (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, 0xffffffffULL, NULL, 0, 0, \
             (post)                                                                  \
     }
+#define CFG_U32_MAX(sec, ik, jk, field, maxv)                                     \
+    {                                                                             \
+        (sec), (ik), (jk), CFGK_U32, CFGK_OFF(field), 0, (maxv), NULL, 0, 0, NULL \
+    }
 #define CFG_U16(sec, ik, jk, field)                                                  \
     {                                                                                \
         (sec), (ik), (jk), CFGK_U16, CFGK_OFF(field), 0, 0xffffULL, NULL, 0, 0, NULL \
@@ -654,6 +658,13 @@ static const cfg_key_desc_t cfg_keys[] = {
             hybrid.tcp_connect_timeout_sec),
     CFG_U32(SEC_HYBRID, "TcpMaxGlobalFlows", "tcp_max_global_flows",
             hybrid.tcp_max_global_flows),
+    /* Per-request cap on HTTP/3 body buffered ahead of the lane. Above
+     * MQVPN_RECV_BODY_BUF_MAX_MAX is almost certainly an operator typo (the
+     * aggregate is this times the number of simultaneously backpressured
+     * flows) -- reject rather than silently clamp. 0 = off, xquic's unbounded
+     * default. */
+    CFG_U32_MAX(SEC_HYBRID, "RecvBodyBufMax", "recv_body_buf_max",
+                hybrid.recv_body_buf_max, MQVPN_RECV_BODY_BUF_MAX_MAX),
     /* [Advanced] — JSON side lives inside the bounded "advanced" object.
      * Max mirrors the public setter: above it, xquic's rate x srtt(us)
      * u64 window product overflows (see MQVPN_RECV_RATE_LIMIT_MAX). */

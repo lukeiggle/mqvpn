@@ -60,6 +60,16 @@ extern "C" {
  * at compile time, so a bump cannot build without meeting this comment. */
 #define MQVPN_MAX_PATHS            8
 #define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
+/* [Hybrid] RecvBodyBufMax: per-request high-water on HTTP/3 body read off
+ * the transport but not yet consumed by the lane. 0 (default) = off, xquic's
+ * unbounded buffering unchanged. A useful value is large enough that a
+ * request drained at a healthy rate never reaches it, so the pause engages
+ * only for a sink that has genuinely fallen behind. The ceiling is a sanity
+ * bound on the aggregate: the real budget is this value times the number of
+ * concurrently backpressured flows, so a value above it is an operator typo
+ * rather than a policy. */
+#define MQVPN_RECV_BODY_BUF_MAX_DEFAULT UINT32_C(0)
+#define MQVPN_RECV_BODY_BUF_MAX_MAX     UINT32_C(64 * 1024 * 1024)
 
 /* ─── Opaque handles ─── */
 

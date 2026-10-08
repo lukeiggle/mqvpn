@@ -260,6 +260,17 @@ typedef struct {
                                        * the whole server). Ignored by client-side
                                        * classify(), like the egress ACL fields below. */
 
+    /* [Hybrid] RecvBodyBufMax: per-request high-water, in bytes, on HTTP/3
+     * body that xquic has read off the transport stream but the lane has not
+     * yet consumed. Consumed by BOTH endpoints: the client terminates the
+     * downlink direction in tcp_lane.c, the server terminates the uplink
+     * direction in tcp_egress.c, and both can stall behind their local
+     * socket. 0 = off (xquic's unbounded default). Not a lane-local budget:
+     * it is passed through to xqc_conn_settings_t.h3_recv_body_buf_max,
+     * because the only place the backpressure can be applied is where the
+     * flow-control credit is issued. */
+    uint32_t recv_body_buf_max;
+
     /* Server-only egress ACL (connect-tcp destination policy).
      * egress_allow punches holes through the mandatory default-deny;
      * egress_deny adds extra blocks. Ignored by client-side classify(). */
@@ -309,6 +320,7 @@ mqvpn_hybrid_config_default(mqvpn_hybrid_config_t *cfg)
     cfg->tcp_idle_timeout_sec = 300;
     cfg->tcp_connect_timeout_sec = MQVPN_TCP_CONNECT_TIMEOUT_SEC_DEFAULT;
     cfg->tcp_max_global_flows = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
+    cfg->recv_body_buf_max = 0; /* MQVPN_RECV_BODY_BUF_MAX_DEFAULT: off */
     /* n_egress_allow / n_egress_deny already 0 from the memset above. */
 }
 
@@ -367,7 +379,9 @@ mqvpn_hybrid_config_sanitize(mqvpn_hybrid_config_t *cfg, const char **names,
     }
     /* Postcondition pinned: a sanitized config always passes validate —
      * the four resets above cover exactly validate's four checks. Keep the
-     * two functions in lockstep when adding fields. */
+     * two functions in lockstep when adding fields. recv_body_buf_max is
+     * deliberately in neither: like tcp_idle_timeout_sec, 0 is a legitimate
+     * "off" value, and its upper bound is enforced by the loader. */
     return n;
 }
 

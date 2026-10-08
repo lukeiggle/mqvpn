@@ -347,6 +347,7 @@ Terminates inner TCP locally and relays it over an HTTP/3 request stream so a si
 | `TcpIdleTimeoutSec` | Idle-eviction timeout for TCP-lane flows; `0` disables idle eviction | client + server | `300` |
 | `TcpConnectTimeoutSec` | Timeout for the server's egress `connect()`; on expiry the client gets HTTP `504` | server | `10` |
 | `TcpMaxGlobalFlows` | Whole-server cap on concurrent egress TCP flows across all sessions | server | `4096` |
+| `RecvBodyBufMax` | Per-request high-water, in bytes, on HTTP/3 response/request body received but not yet consumed by the lane (`0`–`67108864`; `0` = off, unbounded). When a lane flow's local socket drains slower than the peer sends, the receiver stops reading that request stream at this mark and stops issuing flow-control credit, so the peer blocks instead of the receiver's heap growing. Worst-case memory is this value times the number of simultaneously backpressured flows. Set on both ends: the client bounds downloads, the server bounds uploads | client + server | `0` |
 | `EgressAllow` | CIDR allowed through the default-deny egress ACL for private ranges (repeatable, up to 32) | server | — |
 | `EgressDeny` | Additional CIDR to block, evaluated after `EgressAllow` (repeatable, up to 32) | server | — |
 

@@ -2282,8 +2282,14 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         /* set by the batched-send registration a few lines above; 0 on
          * non-Linux, where that block is compiled out entirely */
         .defer_send_flush = (s->tx_batch != 0),
+        .h3_recv_body_buf_max = s->config.hybrid.recv_body_buf_max,
     };
     mqvpn_build_conn_settings(&cs_input, &conn_settings);
+    /* Announce the cap once at startup, so an operator can confirm that each
+     * endpoint picked it up; the prefix is the same on client and server. */
+    if (conn_settings.h3_recv_body_buf_max) {
+        LOG_I(s, "h3-recv-cap: %u bytes per request", conn_settings.h3_recv_body_buf_max);
+    }
     xqc_server_set_conn_settings(s->engine, &conn_settings);
 
     if (cfg->reinjection == MQVPN_REINJ_DEADLINE) {

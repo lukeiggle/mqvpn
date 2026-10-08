@@ -319,6 +319,12 @@ struct mqvpn_client_s {
     /* ICMP PTB rate limit */
     mqvpn_ptb_bucket_t ptb_bucket;
 
+    /* Next [MEM] emission. 0 = due immediately, so the first line lands on
+     * the first tick after the client is created rather than 30 s later —
+     * a process that OOMs during bring-up should still have left one
+     * sample. */
+    uint64_t next_mem_log_us;
+
     /* Debug: tick thread assertion */
 #ifndef NDEBUG
 #  ifdef _WIN32
@@ -4477,6 +4483,120 @@ tick_redundant_refresh(mqvpn_client_t *c)
         LOG_I(c, "redundant mode: sending copies on every path again");
 }
 
+/* Cadence of the [MEM] line. Matches the platforms' STATUS_INTERVAL_SEC (30)
+ * so a reader can line the two up sample-for-sample; it is redeclared here
+ * rather than shared because the library must not depend on a platform
+ * constant, and a drift between the two is cosmetic rather than functional. */
+#define MQVPN_MEM_LOG_INTERVAL_US ((uint64_t)30 * 1000 * 1000)
+
+/* Resident set size in KiB, or 0 where it is not cheaply available.
+ *
+ * /proc/self/statm field 2 is resident pages; multiplied by the page size it
+ * is the same number the OOM killer's anon-rss figure is derived from, which
+ * is what makes it the right instrument here. Deliberately not getrusage():
+ * ru_maxrss is a high-water mark, so it never comes back down and cannot show
+ * a leak stopping.
+ *
+ * Non-Linux returns 0 and the caller prints rss_kb=0 rather than omitting the
+ * field, so the line's shape is the same on every platform and a parser does
+ * not need two cases. */
+static unsigned long long
+client_rss_kb(void)
+{
+#if defined(__linux__)
+    FILE *f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    unsigned long long total_pages = 0, resident_pages = 0;
+    int n = fscanf(f, "%llu %llu", &total_pages, &resident_pages);
+    fclose(f);
+    if (n != 2) return 0;
+    long page_sz = sysconf(_SC_PAGESIZE);
+    if (page_sz <= 0) return 0;
+    /* 64-bit product: on a 32-bit build pages x page size overflows
+     * unsigned long at 4 GiB, which is the range this line exists for. */
+    return resident_pages * (unsigned long long)page_sz / 1024ULL;
+#else
+    return 0;
+#endif
+}
+
+/* The "max" counter from this process's cgroup v2 memory.events: how many
+ * times the cgroup's usage hit memory.max and was throttled into reclaim.
+ * Under a systemd MemoryMax= this is the event that precedes an OOM kill, and
+ * a process held at its limit can look merely slow from the outside, so the
+ * count belongs in the process's own log. -1 where it is not available
+ * (non-Linux, cgroup v1, no memory controller on the cgroup) rather than 0,
+ * because 0 is the healthy reading.
+ *
+ * The cgroup is resolved from /proc/self/cgroup's unified ("0::") entry on
+ * every call. Under a cgroup namespace that entry is "/" and the file is
+ * /sys/fs/cgroup/memory.events itself; otherwise it is the unit's own
+ * directory below /sys/fs/cgroup.
+ *
+ * Not on Android: an app has no cgroup of its own to read there, and the
+ * attempt is a policy denial logged by the system on every interval. */
+static long long
+client_cgroup_mem_max_events(void)
+{
+#if defined(__linux__) && !defined(__ANDROID__)
+    char line[512];
+    char cg[512];
+    int found = 0;
+    FILE *f = fopen("/proc/self/cgroup", "r");
+    if (!f) return -1;
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "0::", 3) == 0) {
+            size_t n = strcspn(line + 3, "\n");
+            if (n == 0 || n >= sizeof(cg)) break;
+            memcpy(cg, line + 3, n);
+            cg[n] = '\0';
+            found = 1;
+            break;
+        }
+    }
+    fclose(f);
+    if (!found) return -1;
+
+    char path[600];
+    const char *sep = cg[strlen(cg) - 1] == '/' ? "" : "/";
+    int w = snprintf(path, sizeof(path), "/sys/fs/cgroup%s%smemory.events", cg, sep);
+    if (w < 0 || (size_t)w >= sizeof(path)) return -1;
+    f = fopen(path, "r");
+    if (!f) return -1;
+    long long max_events = -1;
+    char key[32];
+    unsigned long long val;
+    while (fscanf(f, "%31s %llu", key, &val) == 2) {
+        if (strcmp(key, "max") == 0) {
+            max_events = (long long)val;
+            break;
+        }
+    }
+    fclose(f);
+    return max_events;
+#else
+    return -1;
+#endif
+}
+
+/* Periodic memory line. Emitted unconditionally (not only in ESTABLISHED):
+ * a client stuck reconnecting while holding memory is exactly a case worth a
+ * sample. */
+static void
+tick_mem_log(mqvpn_client_t *c)
+{
+    uint64_t now = client_now_us(c);
+    if (now < c->next_mem_log_us) return;
+    c->next_mem_log_us = now + MQVPN_MEM_LOG_INTERVAL_US;
+    mqvpn_stats_t st;
+    if (mqvpn_client_get_stats(c, &st) != MQVPN_OK) return;
+    LOG_I(c,
+          "[MEM] rss_kb=%llu h3_recv_buffered=%" PRIu64 " flows_paused=%" PRIu64
+          " cg_max_events=%lld",
+          client_rss_kb(), st.h3_recv_buffered_bytes, st.tcp_flows_paused,
+          client_cgroup_mem_max_events());
+}
+
 int
 mqvpn_client_tick(mqvpn_client_t *c)
 {
@@ -4503,6 +4623,9 @@ mqvpn_client_tick(mqvpn_client_t *c)
     if (c->conn && c->conn->tcp_lane)
         mqvpn_tcp_lane_tick(c->conn->tcp_lane, client_now_us(c));
 #endif
+
+    /* Last, so the gauges it reads are this tick's, not the previous one's. */
+    tick_mem_log(c);
 
     return MQVPN_OK;
 }

@@ -1145,6 +1145,74 @@ TEST(client_tick_ok)
     mqvpn_client_destroy(c);
 }
 
+/* [MEM] line cadence: one line on the first tick, then one per 30 s of the
+ * client's clock, whatever the tick rate. The line's field order is what log
+ * readers grep for, so the shape is pinned too. */
+static uint64_t g_mem_fake_now_us = 0;
+static int g_mem_lines = 0;
+static int g_mem_shape_ok = 1;
+
+static uint64_t
+mem_fake_clock(void *ctx)
+{
+    (void)ctx;
+    return g_mem_fake_now_us;
+}
+
+static void
+mem_count_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
+{
+    (void)user_ctx;
+    const char *p = strstr(msg, "[MEM] ");
+    if (!p) return;
+    g_mem_lines++;
+    if (level != MQVPN_LOG_INFO || !strstr(p, "[MEM] rss_kb=") ||
+        !strstr(p, " h3_recv_buffered=0 flows_paused=0 cg_max_events=")) {
+        g_mem_shape_ok = 0;
+    }
+}
+
+TEST(client_mem_log_cadence)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    mqvpn_config_set_server(cfg, "1.2.3.4", 443);
+    mqvpn_config_set_log_level(cfg, MQVPN_LOG_INFO);
+    mqvpn_config_set_clock(cfg, mem_fake_clock, NULL);
+    mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
+    cbs.tun_output = dummy_tun_output;
+    cbs.tunnel_config_ready = dummy_config_ready;
+    cbs.log = mem_count_log;
+
+    g_mem_fake_now_us = 1000000;
+    g_mem_lines = 0;
+    g_mem_shape_ok = 1;
+    mqvpn_client_t *c = mqvpn_client_new(cfg, &cbs, NULL);
+    mqvpn_config_free(cfg);
+    ASSERT_NE(c, NULL);
+
+    ASSERT_EQ(mqvpn_client_tick(c), MQVPN_OK);
+    ASSERT_EQ(g_mem_lines, 1); /* due immediately */
+    ASSERT_EQ(mqvpn_client_tick(c), MQVPN_OK);
+    ASSERT_EQ(g_mem_lines, 1); /* same instant: not again */
+
+    g_mem_fake_now_us += 29999999;
+    ASSERT_EQ(mqvpn_client_tick(c), MQVPN_OK);
+    ASSERT_EQ(g_mem_lines, 1);
+    g_mem_fake_now_us += 1;
+    ASSERT_EQ(mqvpn_client_tick(c), MQVPN_OK);
+    ASSERT_EQ(g_mem_lines, 2); /* exactly 30 s later */
+
+    /* 100 s of 1 s ticks: lines at +30, +60, +90 from the last one. */
+    for (int i = 0; i < 100; i++) {
+        g_mem_fake_now_us += 1000000;
+        ASSERT_EQ(mqvpn_client_tick(c), MQVPN_OK);
+    }
+    ASSERT_EQ(g_mem_lines, 5);
+    ASSERT_EQ(g_mem_shape_ok, 1);
+
+    mqvpn_client_destroy(c);
+}
+
 /* ── Query functions ── */
 
 TEST(client_get_state_null)
@@ -4281,6 +4349,7 @@ main(void)
     run_client_disconnect_from_idle();
     run_client_tick_null_safety();
     run_client_tick_ok();
+    run_client_mem_log_cadence();
 
     /* Query tests */
     run_client_get_state_null();

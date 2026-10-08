@@ -188,6 +188,12 @@ things keep them theoretical, and the third is the one that matters:
    Until the first is observed climbing into the hundreds, a per-connection
    aggregate cap is a solution to a number nobody has seen; the gauges ship
    first so that decision is made from data rather than from this arithmetic.
+   The client also logs both every 30 s on one line beside its resident set
+   size and its cgroup's `memory.events` `max` count
+   (`[MEM] rss_kb=… h3_recv_buffered=… flows_paused=… cg_max_events=…`;
+   `rss_kb` reads 0 off Linux and `cg_max_events` -1 on Android and wherever
+   no cgroup v2 memory controller is visible), so growth toward the limit is
+   attributable from the client's own log.
 
 Operators who need the hard bound to fit the box should lower `TcpMaxFlows` or
 `RecvBodyBufMax`, in that order — `TcpMaxFlows` also bounds the per-flow uplink

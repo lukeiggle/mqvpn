@@ -304,7 +304,8 @@ Return per-client and per-path detail for all currently connected clients.
           "bytes_tx":900,"bytes_rx":1900,
           "pkt_sent":50,"pkt_recv":49,"pkt_lost":1,
           "state":2,"state_label":"active",
-          "reinject_tx_bytes":0
+          "reinject_tx_bytes":0,
+          "cc_mode":"probe_bw"
         }
       ]
     }
@@ -349,6 +350,7 @@ Return per-client and per-path detail for all currently connected clients.
 | `state`        | uint   | xquic transport path state (numeric). **Legacy** — prefer `state_label` for new code; the numeric value is the raw `xqc_path_state_t` and may shift if xquic re-orders the enum. |
 | `state_label`  | string | Stable label for the state — one of `init`, `validating`, `active`, `closing`, `closed`, `unknown`. Added in v0.5.0. |
 | `reinject_tx_bytes` | uint64 | Cumulative bytes speculatively duplicated onto this path by reinjection (`[Multipath] Reinjection`; see README). 0 when reinjection is `off` (the default). Added in v0.15.0. |
+| `cc_mode` | string | The mode of the path's congestion controller: `startup`, `drain`, `probe_bw` or `probe_rtt` with `CC = bbr2` or `bbr`, `none` for a controller without modes (`cubic`, `none`), `unknown` for any other value. **While it reads `startup`, the path has not been filled yet**: the controller's bandwidth estimate, from which it sets the pacing rate and `cwnd`, is the largest rate the path has delivered since it started, and STARTUP does not age it. BBRv2 stays in STARTUP for as long as the path is never filled (every round app-limited), which on a multipath connection can be the life of the connection for the less-used path. The same holds for `probe_rtt` when that PROBE_RTT was entered from STARTUP, which it returns to. Monitors that judge a path by its congestion state should skip it while `cc_mode` is `startup` or `probe_rtt` (a path out of STARTUP spends only about 200 ms plus one round trip per few seconds in PROBE_RTT, so little is lost). |
 
 > **Note on `state`:** the numeric value is the raw xquic transport-layer path
 > state, **not** the mqvpn scheduler's logical role (primary / standby / etc.).
@@ -553,6 +555,15 @@ mqvpn follows semantic versioning for the control API:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.
+- `get_status` path objects gained `cc_mode`, the BBR/BBRv2 mode of each
+  path's congestion controller, so that a path still in STARTUP (never
+  filled, its bandwidth estimate an unaged maximum) can be told apart from
+  one with a measured estimate. Additive; existing JSON consumers remain
+  unaffected. `mqvpn_path_stats_t` gains an appended `cc_mode` (a
+  `mqvpn_cc_mode_t`) in what was tail padding, so the struct's size, and
+  its `struct_size`, do not change: `struct_size` cannot signal whether the
+  library fills the field, and a library that predates it leaves the byte
+  as the caller initialised it. No SOVERSION bump is needed.
 - `get_status` client objects gained `scheduler` in v0.18.0 (JSON only; the C
   struct `mqvpn_client_info_t` is unchanged). Additive; existing JSON
   consumers remain unaffected.

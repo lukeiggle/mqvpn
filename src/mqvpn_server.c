@@ -2839,6 +2839,28 @@ mqvpn_path_state_label(int state)
     }
 }
 
+/* mqvpn_cc_mode_t mirrors xquic's public xqc_cc_mode_t value for value, so
+ * xqc_path_metrics_t.path_cc_mode is copied through unchanged. */
+_Static_assert(MQVPN_CC_MODE_NONE == XQC_CC_MODE_NONE &&
+                   MQVPN_CC_MODE_STARTUP == XQC_CC_MODE_STARTUP &&
+                   MQVPN_CC_MODE_DRAIN == XQC_CC_MODE_DRAIN &&
+                   MQVPN_CC_MODE_PROBE_BW == XQC_CC_MODE_PROBE_BW &&
+                   MQVPN_CC_MODE_PROBE_RTT == XQC_CC_MODE_PROBE_RTT,
+               "mqvpn_cc_mode_t drifted from xquic xqc_cc_mode_t");
+
+const char *
+mqvpn_cc_mode_label(int mode)
+{
+    switch (mode) {
+    case MQVPN_CC_MODE_NONE: return "none";
+    case MQVPN_CC_MODE_STARTUP: return "startup";
+    case MQVPN_CC_MODE_DRAIN: return "drain";
+    case MQVPN_CC_MODE_PROBE_BW: return "probe_bw";
+    case MQVPN_CC_MODE_PROBE_RTT: return "probe_rtt";
+    default: return "unknown";
+    }
+}
+
 /* Derive an operator-readable mp_state label by walking the per-path metrics
  * xquic populated. The raw xqc_conn_stats_t.mp_state field only distinguishes
  * "no multipath / not validated / validated" (values 0/2/1, see
@@ -3185,6 +3207,7 @@ mqvpn_server_get_client_info(const mqvpn_server_t *server, mqvpn_client_info_t *
             ps->pkt_recv = pm->path_pkt_recv_count;
             ps->pkt_lost = pm->path_lost_count;
             ps->state = pm->path_state;
+            ps->cc_mode = pm->path_cc_mode;
         }
         ci->n_paths = np;
         free(st.paths_info);

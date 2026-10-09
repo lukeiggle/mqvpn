@@ -1723,6 +1723,20 @@ TEST(server_session_quic_loopback)
     }
     ASSERT_EQ(g_cli_tun_output_called, baseline + 1);
 
+    /* get_client_info carries each path's congestion-control mode. The
+     * default controller is BBRv2, so the path reports one of its modes
+     * (STARTUP on a connection this young), never MQVPN_CC_MODE_NONE. */
+    mqvpn_client_info_t cinfo[2];
+    memset(cinfo, 0, sizeof(cinfo));
+    for (int k = 0; k < 2; k++)
+        cinfo[k].struct_size = sizeof(cinfo[k]);
+    int n_cinfo = 0;
+    ASSERT_EQ(mqvpn_server_get_client_info(svr, cinfo, 2, &n_cinfo), MQVPN_OK);
+    ASSERT_EQ(n_cinfo, 1);
+    ASSERT_EQ(cinfo[0].n_paths, 1);
+    ASSERT_NE(cinfo[0].paths[0].cc_mode, MQVPN_CC_MODE_NONE);
+    ASSERT_EQ(cinfo[0].paths[0].cc_mode <= MQVPN_CC_MODE_PROBE_RTT, 1);
+
     /* Phase 2b: DL TTL=1 is dropped; ICMP Time Exceeded via tun_output */
     uint8_t ttl1_pkt[40];
     memset(ttl1_pkt, 0, sizeof(ttl1_pkt));

@@ -492,7 +492,30 @@ typedef struct {
     uint64_t pkt_recv;
     uint64_t pkt_lost;
     uint8_t state;
+    /* cc_mode: the mode of the path's congestion controller, a
+     * mqvpn_cc_mode_t. With a BBR controller in MQVPN_CC_MODE_STARTUP the
+     * path has not yet been filled: its bandwidth estimate is the largest
+     * rate it has delivered since it started and is not aged, and a path the
+     * flow never fills can stay in STARTUP indefinitely. The same holds in
+     * MQVPN_CC_MODE_PROBE_RTT when that PROBE_RTT was entered from STARTUP,
+     * which it returns to.
+     *
+     * cc_mode occupies what was tail padding after state, so
+     * sizeof(mqvpn_path_stats_t), and with it struct_size, is the same with
+     * and without it: struct_size cannot tell a caller whether the library
+     * fills it. A library that predates it leaves the byte as the caller
+     * initialised it. */
+    uint8_t cc_mode;
 } mqvpn_path_stats_t;
+
+/* mqvpn_path_stats_t.cc_mode. The values are xquic's xqc_cc_mode_t. */
+typedef enum {
+    MQVPN_CC_MODE_NONE = 0, /* a controller without modes (CUBIC, none) */
+    MQVPN_CC_MODE_STARTUP = 1,
+    MQVPN_CC_MODE_DRAIN = 2,
+    MQVPN_CC_MODE_PROBE_BW = 3,
+    MQVPN_CC_MODE_PROBE_RTT = 4,
+} mqvpn_cc_mode_t;
 
 typedef struct {
     uint32_t struct_size;

@@ -294,6 +294,11 @@ mqvpn_client_test_redundant_tx(mqvpn_client_t *c);
 MQVPN_INTERNAL void mqvpn_client_test_set_slot(mqvpn_client_t *c, int idx, int live,
                                                uint64_t xqc_path_id);
 
+/* Map mqvpn_path_stats_t.cc_mode (mqvpn_cc_mode_t, xquic's xqc_cc_mode_t) to
+ * "none", "startup", "drain", "probe_bw" or "probe_rtt"; any other value is
+ * "unknown". Static storage — do not free. */
+MQVPN_INTERNAL const char *mqvpn_cc_mode_label(int mode);
+
 /* Snapshot of FEC / multipath counters for one client.
  * INTERNAL — not in public libmqvpn.h. Field widths chosen to safely accept
  * either uint32_t or uint64_t xquic counters now or in the future.

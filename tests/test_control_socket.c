@@ -136,6 +136,14 @@ mqvpn_path_state_label(int state)
     return state == 2 ? "active" : "validating";
 }
 
+/* "probe_rtt" is the longest label mqvpn_cc_mode_label() returns, for the
+ * worst-case reply below. */
+const char *
+mqvpn_cc_mode_label(int mode)
+{
+    return mode == MQVPN_CC_MODE_STARTUP ? "startup" : "probe_rtt";
+}
+
 const char *
 mqvpn_version_string(void)
 {
@@ -525,6 +533,9 @@ test_get_status_one_client_with_path(void)
     g_client_info_tmpl.n_paths = 1;
     g_client_info_tmpl.paths[0].path_id = 7;
     g_client_info_tmpl.paths[0].state = 2; /* -> "active" */
+    /* A BBR path in STARTUP: the label tells a consumer the path has not
+     * been filled yet. */
+    g_client_info_tmpl.paths[0].cc_mode = MQVPN_CC_MODE_STARTUP;
     g_client_info_n = 1;
     memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
 
@@ -534,6 +545,7 @@ test_get_status_one_client_with_path(void)
     CHECK_HAS("\"endpoint\":\"1.2.3.4:443\"");
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"state_label\":\"active\"");
+    CHECK_HAS("\"reinject_tx_bytes\":0,\"cc_mode\":\"startup\"}");
     CHECK_HAS("\"endpoint\":\"1.2.3.4:443\",\"scheduler\":\"wlb\"");
 }
 
@@ -810,7 +822,8 @@ seed_worst_case(void)
         ps->srtt_us = ps->min_rtt_us = ps->cwnd = ps->bytes_in_flight = UINT64_MAX;
         ps->bytes_tx = ps->bytes_rx = UINT64_MAX;
         ps->pkt_sent = ps->pkt_recv = ps->pkt_lost = UINT64_MAX;
-        ps->state = UINT8_MAX; /* 3 digits, and the stub's longer label */
+        ps->state = UINT8_MAX;   /* 3 digits, and the stub's longer label */
+        ps->cc_mode = UINT8_MAX; /* the stub's longest cc_mode label */
         g_reinject_tmpl.paths[p].path_id = (uint64_t)p;
         g_reinject_tmpl.paths[p].reinject_tx_bytes = UINT64_MAX;
     }

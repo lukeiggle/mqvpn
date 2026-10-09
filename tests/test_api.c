@@ -4206,6 +4206,18 @@ TEST(redundant_lane_raw_with_reorder)
     rt_done(c);
 }
 
+/* get_status "cc_mode": one label per xquic xqc_cc_mode_t value. */
+TEST(cc_mode_label)
+{
+    ASSERT_STR_EQ(mqvpn_cc_mode_label(MQVPN_CC_MODE_NONE), "none");
+    ASSERT_STR_EQ(mqvpn_cc_mode_label(MQVPN_CC_MODE_STARTUP), "startup");
+    ASSERT_STR_EQ(mqvpn_cc_mode_label(MQVPN_CC_MODE_DRAIN), "drain");
+    ASSERT_STR_EQ(mqvpn_cc_mode_label(MQVPN_CC_MODE_PROBE_BW), "probe_bw");
+    ASSERT_STR_EQ(mqvpn_cc_mode_label(MQVPN_CC_MODE_PROBE_RTT), "probe_rtt");
+    ASSERT_STR_EQ(mqvpn_cc_mode_label(5), "unknown");
+    ASSERT_STR_EQ(mqvpn_cc_mode_label(-1), "unknown");
+}
+
 /* ── Main ── */
 
 int
@@ -4448,6 +4460,7 @@ main(void)
 
     /* Server info tests */
     run_server_get_client_info_null_safety();
+    run_cc_mode_label();
 
     /* Utility tests */
     run_generate_key();

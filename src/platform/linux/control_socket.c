@@ -46,6 +46,7 @@
 #include <event2/event.h>
 #include "mqvpn_internal.h" /* mqvpn_server_scheduler_label,
                                mqvpn_path_state_label,
+                               mqvpn_cc_mode_label,
                                mqvpn_internal_fec_stats_t (carries mp_state_label),
                                mqvpn_server_get_client_fec_stats,
                                mqvpn_server_get_all_fec_stats,
@@ -359,6 +360,8 @@ ctrl_cmd_get_status(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t 
                                             mqvpn_path_state_label(ps->state));
             ok &=
                 yyjson_mut_obj_add_uint(doc, jp, "reinject_tx_bytes", reinject_tx_bytes);
+            ok &= yyjson_mut_obj_add_strcpy(doc, jp, "cc_mode",
+                                            mqvpn_cc_mode_label(ps->cc_mode));
         }
     }
     if (!ok) {

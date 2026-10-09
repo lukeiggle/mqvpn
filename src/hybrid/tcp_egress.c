@@ -351,15 +351,19 @@ typedef struct svr_tcp_egress_flow_s {
                                    * flush). A pure readiness notify that
                                    * moves zero bytes (e.g. a writable event
                                    * that still can't drain the stash) does
-                                   * NOT refresh this — that is precisely
-                                   * what makes a flow parked by uplink
-                                   * backpressure (uplink_withheld=1 with the
-                                   * client never reopening its H3 receive
-                                   * window) eventually idle-evictable: it has
-                                   * no other recovery path. Initialized at
-                                   * connect() start and again when the flow
-                                   * goes ACTIVE; svr_tcp_egress_tick compares
-                                   * it against config.hybrid.tcp_idle_timeout_sec
+                                   * NOT refresh this. When the server's own
+                                   * receive cap is configured
+                                   * (recv_body_buf_max != 0), a flow holding
+                                   * uplink bytes the transport refused (peer
+                                   * credit or a full send queue;
+                                   * uplink_withheld) is waiting on the peer
+                                   * rather than idle: the idle sweep keeps it
+                                   * (see svr_tcp_egress_tick), and the flush
+                                   * that drains the stash restarts this
+                                   * clock. Initialized at connect() start and
+                                   * again when the flow goes ACTIVE;
+                                   * svr_tcp_egress_tick compares it against
+                                   * config.hybrid.tcp_idle_timeout_sec
                                    * (0 = disabled, shared field with the
                                    * client's tcp_lane — see classifier.h). */
     char username[64];            /* sized to match svr_auth_check's out
@@ -396,8 +400,9 @@ typedef struct svr_tcp_egress_flow_s {
                                  * deferred-during-pause case retries exactly
                                  * once when the stash finally drains. */
 
-    int uplink_withheld; /* xquic send-side backpressure (-XQC_EAGAIN or a
-                          * partial accept): uplink_stash holds one unsent
+    int uplink_withheld; /* send refused by the transport (peer credit or a
+                          * full send queue; -XQC_EAGAIN or a partial
+                          * accept): uplink_stash holds one unsent
                           * chunk already pulled out of the egress socket
                           * via recv() (same "already consumed" hazard as
                           * the downlink direction). want_read is dropped
@@ -405,6 +410,8 @@ typedef struct svr_tcp_egress_flow_s {
                           * svr_tcp_egress_update_fd_interest. */
     uint8_t *uplink_stash;
     size_t uplink_stash_len;
+    int withheld_warned; /* the "kept past the idle timeout" warning has been
+                          * logged for this flow (once per flow) */
     int egress_eof_seen; /* recv()==0 observed — want_read is dropped
                           * PERMANENTLY for this fd (EOF is level-triggered
                           * readable; re-arming would busy-loop). */
@@ -613,6 +620,38 @@ svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
     svr_tcp_egress_abort(server, ef);
 }
 
+/* The flow's target as "ip:port" / "[ip6]:port", from getpeername on its own
+ * connected fd; "?" when that fails. For log lines only. */
+static void
+svr_tcp_egress_peer_str(const svr_tcp_egress_flow_t *ef, char *peer, size_t peer_sz)
+{
+    /* sockaddr_storage (was sockaddr_in): the egress fd may now be an
+     * AF_INET6 socket — getpeername's own on-wire shape doesn't change, only
+     * the buffer that has to hold it. The log wording around the peer value
+     * (marker text an e2e wait_for_log may grep on) is UNCHANGED; only the %s
+     * peer VALUE gains v6 capability. */
+    snprintf(peer, peer_sz, "?");
+    struct sockaddr_storage sa;
+    socklen_t sl = sizeof(sa);
+    if (getpeername(ef->fd, (struct sockaddr *)&sa, &sl) == 0) {
+        if (sa.ss_family == AF_INET) {
+            struct sockaddr_in *sa4 = (struct sockaddr_in *)&sa;
+            char ip[INET_ADDRSTRLEN];
+            if (inet_ntop(AF_INET, &sa4->sin_addr, ip, sizeof(ip)))
+                snprintf(peer, peer_sz, "%s:%u", ip, (unsigned)ntohs(sa4->sin_port));
+        } else if (sa.ss_family == AF_INET6) {
+            struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&sa;
+            char ip[INET6_ADDRSTRLEN];
+            /* Bracket the v6 literal ("[%s]:%u", not "%s:%u"): a bare
+             * "2001:db8::1:80" is ambiguous host-vs-port. Only the
+             * interpolated peer VALUE changes; the surrounding
+             * "connect-tcp: flow to %s ..." marker text is untouched. */
+            if (inet_ntop(AF_INET6, &sa6->sin6_addr, ip, sizeof(ip)))
+                snprintf(peer, peer_sz, "[%s]:%u", ip, (unsigned)ntohs(sa6->sin6_port));
+        }
+    }
+}
+
 /* ACTIVE-flow idle-timeout eviction (the limits work this file's tick
  * docstring referenced). Same destroy-ownership discipline as
  * on_relay_error above (svr_tcp_egress_abort: `ef` is freed on return) —
@@ -625,42 +664,21 @@ svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
  * Log-level split: a plain idle eviction is NORMAL operation (a TCP
  * connection simply went quiet past the configured timeout) — INFO. A flow
  * parked by uplink backpressure (uplink_withheld: the client stopped
- * reading its H3 body and never reopened its receive window; this sweep is
- * that flow's ONLY collector) suggests a misbehaving/stuck client — WARN,
- * with distinct wording so an operator can grep the two apart. The flow's
- * target comes from getpeername on its own connected fd (identical to the
- * connect() target, no extra per-flow state needed); the username was
- * captured at auth time. */
+ * reading its H3 body and never reopened its receive window) suggests a
+ * misbehaving/stuck client — WARN, with distinct wording so an operator can
+ * grep the two apart. With the server's receive cap configured such a flow
+ * is kept instead of evicted (see svr_tcp_egress_tick) and never reaches
+ * here.
+ *
+ * The flow's target comes from getpeername on its own connected fd
+ * (identical to the connect() target, no extra per-flow state needed); the
+ * username was captured at auth time. */
 static void
 svr_tcp_egress_on_idle_evict(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                              uint32_t idle_timeout_sec)
 {
-    /* sockaddr_storage (was sockaddr_in): the egress fd may now be an
-     * AF_INET6 socket — getpeername's own on-wire shape doesn't change, only
-     * the buffer that has to hold it. The log wording below (marker text an
-     * e2e wait_for_log may grep on) is UNCHANGED; only the %s peer VALUE
-     * gains v6 capability. */
-    char peer[64] = "?";
-    struct sockaddr_storage sa;
-    socklen_t sl = sizeof(sa);
-    if (getpeername(ef->fd, (struct sockaddr *)&sa, &sl) == 0) {
-        if (sa.ss_family == AF_INET) {
-            struct sockaddr_in *sa4 = (struct sockaddr_in *)&sa;
-            char ip[INET_ADDRSTRLEN];
-            if (inet_ntop(AF_INET, &sa4->sin_addr, ip, sizeof(ip)))
-                snprintf(peer, sizeof(peer), "%s:%u", ip, (unsigned)ntohs(sa4->sin_port));
-        } else if (sa.ss_family == AF_INET6) {
-            struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&sa;
-            char ip[INET6_ADDRSTRLEN];
-            /* Bracket the v6 literal ("[%s]:%u", not "%s:%u"): a bare
-             * "2001:db8::1:80" is ambiguous host-vs-port. Only the
-             * interpolated peer VALUE changes; the surrounding
-             * "connect-tcp: flow to %s ..." marker text is untouched. */
-            if (inet_ntop(AF_INET6, &sa6->sin6_addr, ip, sizeof(ip)))
-                snprintf(peer, sizeof(peer), "[%s]:%u", ip,
-                         (unsigned)ntohs(sa6->sin6_port));
-        }
-    }
+    char peer[64];
+    svr_tcp_egress_peer_str(ef, peer, sizeof(peer));
     if (ef->uplink_withheld) {
         TLOG_W(server,
                "connect-tcp: flow to %s (user %s) parked by client backpressure "
@@ -1372,8 +1390,34 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
         } else if (idle_evict_enabled && now_us > ef->last_activity_us &&
                    now_us - ef->last_activity_us > idle_us) {
             /* Wraparound-safe age test (now_us > last_activity_us guard),
-             * same form as the client's mqvpn_tcp_lane_tick sweep. */
-            svr_tcp_egress_on_idle_evict(server, ef, ctx.tcp_idle_timeout_sec);
+             * same form as the client's mqvpn_tcp_lane_tick sweep.
+             *
+             * With the server's own receive cap configured
+             * (recv_body_buf_max != 0), a flow with uplink_withheld set is
+             * waiting on the peer, not idle: it holds origin bytes the
+             * transport refused (the client's stream credit is used up, or
+             * the send queue is full). A client that has paused reading
+             * this stream at its per-request high-water grants credit in
+             * bursts, and a slow consumer behind it can leave the gap
+             * between bursts longer than the idle timeout. Such a flow is
+             * kept, and logged once so a client that never resumes is
+             * visible. It stays collectable by the client resetting the
+             * stream (its own lane idle eviction included) and by the
+             * connection closing. Without the cap the sweep evicts it as
+             * before. */
+            if (ef->uplink_withheld && ctx.recv_body_buf_max != 0) {
+                if (!ef->withheld_warned) {
+                    ef->withheld_warned = 1;
+                    char peer[64];
+                    svr_tcp_egress_peer_str(ef, peer, sizeof(peer));
+                    TLOG_W(server,
+                           "connect-tcp: flow to %s (user %s) withheld by peer credit "
+                           "past the idle timeout (%u s); kept",
+                           peer, ef->username, ctx.tcp_idle_timeout_sec);
+                }
+            } else {
+                svr_tcp_egress_on_idle_evict(server, ef, ctx.tcp_idle_timeout_sec);
+            }
         }
         ef = next;
     }

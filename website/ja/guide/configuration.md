@@ -339,7 +339,7 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | `Enabled` | マスタースイッチ | client + server | `false` |
 | `Tcp` | フロー単位の TCP レーンポリシー: `stream`（常に使用）、`raw`（不使用 — hybrid 無効時とバイト同一）、`auto`（SYN 時点でアクティブパスが 2 本以上なら TCP レーン。判定はフローの生存期間中固定） | client | `auto` |
 | `TcpMaxFlows` | 同時 TCP レーンフロー数の上限。**client と server で実装も失敗時の挙動も異なる** — 詳細はこの表の直下の **`TcpMaxFlows`の注意点** を参照 | client + server | `256` |
-| `TcpIdleTimeoutSec` | TCP レーンフローのアイドル破棄タイムアウト。`0` で無効化 | client + server | `300` |
+| `TcpIdleTimeoutSec` | TCP レーンフローのアイドル破棄タイムアウト。`0` で無効化。サーバーでは、`RecvBodyBufMax` が設定されている場合、クライアントのフロー制御クレジットによってクライアントへの中継が止められているフローはアイドルではなくクライアント待ちとみなされ、破棄されません（フローごとに 1 回警告をログに出力します） | client + server | `300` |
 | `TcpConnectTimeoutSec` | サーバの egress `connect()` タイムアウト。超過時クライアントは HTTP `504` を受け取ります | server | `10` |
 | `TcpMaxGlobalFlows` | 全セッション合計の egress TCP フロー数のサーバ全体上限 | server | `4096` |
 | `EgressAllow` | プライベートレンジ向けデフォルト拒否 egress ACL を通す CIDR（繰り返し可、最大 32） | server | — |

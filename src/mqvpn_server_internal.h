@@ -137,6 +137,10 @@ typedef struct {
     uint32_t tcp_idle_timeout_sec;    /* ACTIVE-flow idle eviction, shared with the
                                        * client's tcp_lane (config.hybrid); 0 = disabled,
                                        * see the field comment in classifier.h */
+    uint32_t recv_body_buf_max;       /* server's own per-request receive cap
+                                       * (config.hybrid); 0 = unset. Gates the
+                                       * idle sweep's exemption for flows
+                                       * withheld by the peer's credit. */
     int global_fd_budget;             /* mqvpn_server_egress_fd_budget(s) */
 } svr_tcp_egress_srv_ctx_t;
 

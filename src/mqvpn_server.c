@@ -1581,6 +1581,7 @@ svr_get_tcp_egress_ctx(mqvpn_server_t *s, svr_tcp_egress_srv_ctx_t *out)
     out->tcp_max_flows = s->config.hybrid.tcp_max_flows;
     out->tcp_connect_timeout_sec = s->config.hybrid.tcp_connect_timeout_sec;
     out->tcp_idle_timeout_sec = s->config.hybrid.tcp_idle_timeout_sec;
+    out->recv_body_buf_max = s->config.hybrid.recv_body_buf_max;
     out->global_fd_budget = s->egress_fd_budget; /* frozen at server_new */
 }
 

@@ -90,6 +90,12 @@ test_now_us(void)
     return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
 }
 
+/* h3_recv_body_buf_max for the probe connection harness_start builds (0 =
+ * xquic default, which every test but the parked-flow ones runs with). Set
+ * it before harness_start and reset it after; harness_start copies it into
+ * the probe's conn settings at connect time. */
+static uint32_t g_probe_h3_recv_body_buf_max = 0;
+
 /* Counts inner-IP packets the server forwarded out of the tunnel — the
  * observable the tunnel-survival regression test asserts on. */
 static int g_tun_output_count = 0;
@@ -163,13 +169,14 @@ typedef struct {
     size_t raw_recv_cap;
     int raw_recv_fin;
 
-    /* Parked-flow idle-eviction test: when set, probe_cb_request_read's body
-     * branch does NOT call xqc_h3_request_recv_body at all on a
-     * XQC_REQ_NOTIFY_READ_BODY notify — no consumption means xquic never
-     * grows this stream's receive window back, which is exactly the
-     * condition (client stops reading, never reopens flow control) that
-     * parks a server-side connect-tcp flow in uplink_withheld. Independent
-     * of raw_capture (checked first) so the two knobs don't fight. */
+    /* Parked-flow test: when set, probe_cb_request_read's body branch does
+     * NOT call xqc_h3_request_recv_body at all on a XQC_REQ_NOTIFY_READ_BODY
+     * notify. Together with a probe receive high-water
+     * (g_probe_h3_recv_body_buf_max) that pauses the request and stops
+     * xquic issuing stream credit, which is the condition (client stops
+     * reading, flow control stays shut) that parks a server-side
+     * connect-tcp flow in uplink_withheld. Independent of raw_capture
+     * (checked first) so the two knobs don't fight. */
     int suppress_body_drain;
 } probe_conn_t;
 
@@ -795,6 +802,7 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
             .scheduler = MQVPN_SCHED_MINRTT,
             .cc = MQVPN_CC_BBR2,
             .init_max_path_id = 0,
+            .h3_recv_body_buf_max = g_probe_h3_recv_body_buf_max,
         };
         mqvpn_build_conn_settings(&cs_in, &cs);
 
@@ -1292,6 +1300,18 @@ harness_cfg_allow_127_idle_timeout_1(mqvpn_config_t *cfg)
         printf("FAIL\n    mqvpn_config_set_hybrid_limits rejected valid input\n");
         exit(1);
     }
+}
+
+/* The 1s idle timeout plus the server's own receive cap
+ * ([Hybrid] RecvBodyBufMax), which is what exempts a flow withheld by the
+ * peer's credit from idle eviction. mqvpn_config_apply_hybrid-style direct
+ * write, since the cap has no public setter (it comes from the INI/JSON
+ * bridge). */
+static void
+harness_cfg_allow_127_idle_timeout_1_recv_cap(mqvpn_config_t *cfg)
+{
+    harness_cfg_allow_127_idle_timeout_1(cfg);
+    cfg->hybrid.recv_body_buf_max = 16384;
 }
 
 /* Injects an INVALID hybrid scalar the way the INI/JSON bridge does —
@@ -2313,16 +2333,13 @@ TEST(mqvpn_tcp_uplink_backlog_stops_at_unsent_cap)
     free(h.probe.raw_recv_buf);
 }
 
-/* Closing-notify idempotency. (Uplink -XQC_EAGAIN coverage note: the
- * stash-WRITE half of that path — send_body backpressure parking the flow
- * via svr_tcp_egress_stash_uplink — IS exercised by
- * mqvpn_tcp_parked_flow_idle_eviction below, with real H3 window
- * exhaustion, no syscall interposition. What remains uncovered black-box
- * is the stash-FLUSH/resume half: on_h3_writable draining the stash and
- * re-arming want_read once the client reopens its window — the same
- * forcing technique never reopens the window by construction, and the
- * idle sweep collects the flow instead. The e2e/netem chunk owns that
- * resume path.) The probe RESETs its own request mid-relay; the server
+/* Closing-notify idempotency. (Uplink -XQC_EAGAIN coverage note: both
+ * halves of that path — send_body backpressure parking the flow via
+ * svr_tcp_egress_stash_uplink, and on_h3_writable draining the stash and
+ * re-arming want_read once the client reopens its window — are exercised
+ * by mqvpn_tcp_parked_flow_not_idle_evicted below, with real H3 flow
+ * control, no syscall interposition.) The probe RESETs its own request
+ * mid-relay; the server
  * must tear the flow down exactly once (verified indirectly — a
  * double-destroy would double-free/double-close and show up under the
  * ASan run) and must actually close its egress socket as part of that
@@ -2573,24 +2590,71 @@ TEST(mqvpn_tcp_two_flow_same_conn_idle_eviction)
     free(second.raw_recv_buf);
 }
 
-/* ── Limits (Step 2, carry-over from the relay review): parked-flow
- * eviction ──
+/* ── Limits: a flow waiting on client flow control is not idle ──
  *
  * A flow parked by UPLINK backpressure (uplink_withheld=1: the server's
- * send_body() to the client is -XQC_EAGAIN'ing because the client's H3
- * receive window is full AND the client never reads to reopen it) has no
- * recovery path of its own — want_read is dropped for the egress fd, so the
- * server never even looks at that socket again. The ACTIVE idle sweep is
- * its ONLY collector, which is exactly what last_activity_us's "no bytes
- * moved, no refresh" rule (see that field's comment in tcp_egress.c) is for.
+ * send_body() to the client returned -XQC_EAGAIN or a partial accept
+ * because the client's H3 stream credit is used up) holds origin bytes it
+ * could not yet send. It is blocked on the peer, not idle, and must survive
+ * the idle sweep for as long as that lasts: a client that has paused
+ * reading at its per-request receive high-water grants credit in bursts,
+ * and the gap between bursts can exceed the idle timeout. Once the client
+ * reads again, the stash drains, the flow relays everything the origin sent
+ * and, quiet with nothing pending, is idle-evicted as usual.
  *
- * Forced black-box, no syscall interposition needed: the sink floods the
- * egress connection with more data than the default initial H3 stream
- * receive window (XQC_MIN_RECV_WINDOW = 63000 bytes, third_party/xquic/src/
- * transport/xqc_conn.h) while the probe (via suppress_body_drain) never
- * calls recv_body — so xquic never sends a MAX_STREAM_DATA update and the
- * window never reopens. This is a real, not mocked, EAGAIN. */
-TEST(mqvpn_tcp_parked_flow_idle_eviction)
+ * Forced black-box: the probe runs with a small h3_recv_body_buf_max and
+ * suppress_body_drain, so its request pauses and xquic stops issuing stream
+ * credit; the sink then floods the egress connection until the server stops
+ * reading it, which the server only does while uplink_withheld is set. */
+static int
+parked_sink_send(tcp_sink_t *sink, uint64_t *sent_total)
+{
+    uint8_t junk[16384];
+    memset(junk, 0x5a, sizeof(junk));
+    ssize_t n = send(sink->conn_fd, junk, sizeof(junk), MSG_DONTWAIT | MSG_NOSIGNAL);
+    if (n > 0) {
+        *sent_total += (uint64_t)n;
+        return 1;
+    }
+    ASSERT_EQ(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK), 1);
+    return 0;
+}
+
+/* Handshake, open the flow, then flood the egress connection until the
+ * server stops reading it (the flow is withheld). Bounded at 32 MiB and 10 s
+ * of real time so a server that never parks fails here instead of hanging
+ * the suite. The probe must already have its path and suppress_body_drain
+ * set. */
+static void
+parked_flow_open_and_flood(harness_t *h, tcp_sink_t *sink, uint64_t *sent_total)
+{
+    harness_pump(h, &h->probe.handshake_done, 10000);
+    ASSERT_EQ(h->probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h->probe), 0);
+
+    harness_pump_with_sink(h, sink, &h->probe.response_done, 10000);
+    ASSERT_EQ(h->probe.response_done, 1);
+    ASSERT_STREQ(h->probe.status, "200");
+    ASSERT_EQ(sink->conn_fd >= 0, 1);
+
+    /* The sink's send() stays blocked through 500 ms of pumping. */
+    int parked = 0;
+    uint64_t start_us = test_now_us();
+    uint64_t last_progress_us = start_us;
+    while (!parked && *sent_total < (32ull << 20) &&
+           test_now_us() - start_us < 10000000ull) {
+        int moved = 0;
+        while (parked_sink_send(sink, sent_total))
+            moved = 1;
+        if (moved) last_progress_us = test_now_us();
+        int never = 0;
+        harness_pump(h, &never, 20);
+        parked = test_now_us() - last_progress_us > 500000ull;
+    }
+    ASSERT_EQ(parked, 1);
+}
+
+TEST(mqvpn_tcp_parked_flow_not_idle_evicted)
 {
     tcp_sink_t sink;
     ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0); /* we drive sends manually below */
@@ -2599,45 +2663,56 @@ TEST(mqvpn_tcp_parked_flow_idle_eviction)
     snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
 
     harness_t h;
-    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
-                            harness_cfg_allow_127_idle_timeout_1),
-              0);
+    g_probe_h3_recv_body_buf_max = 16384;
+    int start_rc = harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                                 harness_cfg_allow_127_idle_timeout_1_recv_cap);
+    g_probe_h3_recv_body_buf_max = 0;
+    ASSERT_EQ(start_rc, 0);
     h.probe.path = path;
     h.probe.suppress_body_drain = 1;
 
-    harness_pump(&h, &h.probe.handshake_done, 10000);
-    ASSERT_EQ(h.probe.handshake_done, 1);
-    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    uint64_t sent_total = 0;
+    parked_flow_open_and_flood(&h, &sink, &sent_total);
+    ASSERT_EQ(h.probe.request_closed, 0);
 
-    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
-    ASSERT_EQ(h.probe.response_done, 1);
-    ASSERT_STREQ(h.probe.status, "200");
-    ASSERT_EQ(sink.conn_fd >= 0, 1);
-
-    /* Flood up to 256 KiB from the sink's side — comfortably more than the
-     * ~63000-byte default window. Alternates send()+pump so the relay's
-     * recv()/send_body() loop actually runs while data is available;
-     * bails early if the sink's OWN kernel send buffer fills first (plenty
-     * has already been offered by then). */
-    uint8_t junk[4096];
-    memset(junk, 0x5a, sizeof(junk));
-    for (int i = 0; i < 64; i++) {
-        ssize_t sent =
-            send(sink.conn_fd, junk, sizeof(junk), MSG_DONTWAIT | MSG_NOSIGNAL);
-        if (sent < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) break;
-        int never = 0;
-        harness_pump(&h, &never, 20);
+    /* Pending bytes: well past the 1 s idle timeout, the flow is still
+     * there. Real-wall-clock bound, not iteration count — the idle sweep
+     * fires on real time (svr_now_us), while harness_pump's budget
+     * accounting can run ahead of real time under CI poll churn (see
+     * idle-timeout-evicts). */
+    {
+        uint64_t start_us = test_now_us();
+        while (test_now_us() - start_us < 2500000ull) {
+            int never = 0;
+            harness_pump(&h, &never, 20);
+        }
+    }
+    ASSERT_EQ(h.probe.request_closed, 0);
+    {
+        uint8_t buf[16];
+        ssize_t n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT);
+        ASSERT_EQ(n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK), 1);
     }
 
-    /* Quiet now: no more sink sends, no probe reads. Same bounded wait as
-     * the ACTIVE idle-timeout test above. Checks both sides, like that
-     * test: the sink's real fd close AND the probe's H3 stream close (a
-     * server-initiated stream close/reset is a control-frame operation, not
-     * subject to the very stream-data flow control that's stuck full here,
-     * so it isn't blocked by the probe's own non-draining). */
-    /* Real-wall-clock bound, not iteration count — the idle sweep fires on
-     * real time (svr_now_us), while harness_pump's budget accounting can run
-     * ahead of real time under CI poll churn (see idle-timeout-evicts). */
+    /* The client reads again. Everything the origin sent arrives, the
+     * server's stash drains and it reads the origin again. */
+    h.probe.suppress_body_drain = 0;
+    h.probe.raw_capture = 1;
+    ASSERT_EQ(probe_cb_request_read(h.probe.req, XQC_REQ_NOTIFY_READ_BODY, &h.probe), 0);
+    {
+        uint64_t start_us = test_now_us();
+        while (h.probe.raw_recv_len < sent_total &&
+               test_now_us() - start_us < 10000000ull) {
+            int never = 0;
+            harness_pump(&h, &never, 20);
+        }
+    }
+    ASSERT_EQ(h.probe.raw_recv_len, sent_total);
+    ASSERT_EQ(h.probe.request_closed, 0);
+
+    /* Nothing pending and nothing moving: now the flow is idle, and is
+     * evicted. Checks both sides, like the ACTIVE idle-timeout test: the
+     * sink's real fd close AND the probe's H3 stream close. */
     int sink_eof = 0;
     uint64_t wait_start_us = test_now_us();
     while (!(sink_eof && h.probe.request_closed) &&
@@ -2652,6 +2727,52 @@ TEST(mqvpn_tcp_parked_flow_idle_eviction)
     }
     ASSERT_EQ(sink_eof, 1);
     ASSERT_EQ(h.probe.request_closed, 1);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Without the server's own receive cap ([Hybrid] RecvBodyBufMax unset) the
+ * idle sweep is exactly what it was: a flow withheld by the client's stream
+ * credit is evicted at the timeout like any other idle flow. Same setup as
+ * the test above, minus the server cap. */
+TEST(mqvpn_tcp_parked_flow_idle_evicted_without_server_cap)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    g_probe_h3_recv_body_buf_max = 16384;
+    int start_rc = harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                                 harness_cfg_allow_127_idle_timeout_1);
+    g_probe_h3_recv_body_buf_max = 0;
+    ASSERT_EQ(start_rc, 0);
+    h.probe.path = path;
+    h.probe.suppress_body_drain = 1;
+
+    uint64_t sent_total = 0;
+    parked_flow_open_and_flood(&h, &sink, &sent_total);
+
+    /* Withheld and past the 1 s idle timeout: evicted. Real-wall-clock
+     * bound, as in the tests above. */
+    int sink_eof = 0;
+    uint64_t wait_start_us = test_now_us();
+    while (!(sink_eof && h.probe.request_closed) &&
+           test_now_us() - wait_start_us < 6000000ull) {
+        int never = 0;
+        harness_pump(&h, &never, 20);
+        if (!sink_eof) {
+            uint8_t buf[4096];
+            ssize_t n = recv(sink.conn_fd, buf, sizeof(buf), MSG_DONTWAIT);
+            if (n == 0) sink_eof = 1;
+        }
+    }
+    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(sink_eof, 1);
 
     harness_stop(&h);
     tcp_sink_close(&sink);
@@ -3266,7 +3387,8 @@ main(void)
     run_mqvpn_tcp_closing_notify_idempotent();
     run_mqvpn_tcp_active_idle_timeout_evicts();
     run_mqvpn_tcp_two_flow_same_conn_idle_eviction();
-    run_mqvpn_tcp_parked_flow_idle_eviction();
+    run_mqvpn_tcp_parked_flow_not_idle_evicted();
+    run_mqvpn_tcp_parked_flow_idle_evicted_without_server_cap();
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
     run_connect_ip_v6_address_assign_is_slash_128();

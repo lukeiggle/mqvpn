@@ -73,6 +73,13 @@ typedef struct {
      * only in hybrid mode -- a datagram-only tunnel opens no requests for
      * this to act on. */
     uint32_t h3_recv_body_buf_max;
+
+    /* h3_recv_total_buf_max: per-connection high-water, in bytes, on the
+     * same unconsumed body, summed over the connection's requests. 0
+     * (default) = off, byte-for-byte unchanged behaviour. Independent of
+     * h3_recv_body_buf_max; passed straight through to
+     * xqc_conn_settings_t.h3_recv_total_buf_max. */
+    uint32_t h3_recv_total_buf_max;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins

@@ -538,6 +538,40 @@ test_h3_recv_body_buf_max_passthrough(void)
     return failed;
 }
 
+/* [Hybrid] RecvTotalBufMax -> xqc_conn_settings_t.h3_recv_total_buf_max, on
+ * both endpoints, independently of the per-request value. A zeroed input
+ * must produce a zeroed setting. */
+static int
+test_h3_recv_total_buf_max_passthrough(void)
+{
+    int failed = 0;
+
+    xqc_conn_settings_t off, on;
+    mqvpn_conn_settings_input_t in_off = {
+        .is_server = false,
+        .enable_multipath = true,
+        .scheduler = MQVPN_SCHED_WLB,
+    };
+    mqvpn_build_conn_settings(&in_off, &off);
+    ASSERT_EQ(off.h3_recv_total_buf_max, 0);
+
+    mqvpn_conn_settings_input_t in_on = in_off;
+    in_on.h3_recv_total_buf_max = 768u * 1024 * 1024;
+    mqvpn_build_conn_settings(&in_on, &on);
+    ASSERT_EQ(on.h3_recv_total_buf_max, 768u * 1024 * 1024);
+    ASSERT_EQ(on.h3_recv_body_buf_max, 0);
+
+    xqc_conn_settings_t srv;
+    mqvpn_conn_settings_input_t in_srv = in_on;
+    in_srv.is_server = true;
+    in_srv.h3_recv_body_buf_max = 4 * 1024 * 1024;
+    mqvpn_build_conn_settings(&in_srv, &srv);
+    ASSERT_EQ(srv.h3_recv_total_buf_max, 768u * 1024 * 1024);
+    ASSERT_EQ(srv.h3_recv_body_buf_max, 4 * 1024 * 1024);
+
+    return failed;
+}
+
 int
 main(void)
 {
@@ -550,6 +584,7 @@ main(void)
     failed += test_path_mtu_sizes_packets();
     failed += test_pmtud_sizes();
     failed += test_h3_recv_body_buf_max_passthrough();
+    failed += test_h3_recv_total_buf_max_passthrough();
     failed += test_server_forces_multipath_regardless_of_input();
     failed += test_recv_rate_limit_wiring();
     failed += test_reinjection_mapping();

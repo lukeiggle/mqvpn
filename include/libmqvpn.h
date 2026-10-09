@@ -70,6 +70,16 @@ extern "C" {
  * rather than a policy. */
 #define MQVPN_RECV_BODY_BUF_MAX_DEFAULT UINT32_C(0)
 #define MQVPN_RECV_BODY_BUF_MAX_MAX     UINT32_C(64 * 1024 * 1024)
+/* [Hybrid] RecvTotalBufMax: per-connection high-water on the same body,
+ * summed over the connection's requests. 0 (default) = off. When the total
+ * reaches it, every request holding more than a small floor is paused as if
+ * it had reached RecvBodyBufMax, until the total falls below half; requests
+ * at or under the floor keep reading. It bounds what RecvBodyBufMax alone
+ * cannot: that value times the number of backpressured flows. Sizing: about
+ * half the memory available to the process beyond its baseline, since each
+ * buffered byte carries allocator and per-flow overhead. No ceiling below
+ * the type's own: it is a memory budget, not a per-flow knob. */
+#define MQVPN_RECV_TOTAL_BUF_MAX_DEFAULT UINT32_C(0)
 
 /* ─── Opaque handles ─── */
 
@@ -482,7 +492,8 @@ typedef struct {
      * endpoint's connection(s), in bytes. Rises when a lane flow's local
      * socket drains slower than the peer sends; plateaus at [Hybrid]
      * RecvBodyBufMax times the number of backpressured flows once that key
-     * is set, and is unbounded when it is 0. Client: this connection.
+     * is set, is held near [Hybrid] RecvTotalBufMax per connection once that
+     * key is set, and is unbounded when both are 0. Client: this connection.
      * Server: summed over live sessions. Always 0 without hybrid mode.
      * Appended at the end of the ABI, per the get_stats convention. */
     uint64_t h3_recv_buffered_bytes;

@@ -185,22 +185,37 @@ things keep them theoretical, and the third is the one that matters:
    box-wide thrash.
 3. `tcp_flows_paused` (client `[STATUS]`, server `get_stats`) is the measured
    multiplier, and `h3_recv_buffered_bytes` beside it is the measured total.
-   Until the first is observed climbing into the hundreds, a per-connection
-   aggregate cap is a solution to a number nobody has seen; the gauges ship
-   first so that decision is made from data rather than from this arithmetic.
-   The client also logs both every 30 s on one line beside its resident set
-   size and its cgroup's `memory.events` `max` count
+   When the first can climb into the hundreds, set the per-connection
+   aggregate cap `RecvTotalBufMax` below, sized from these gauges rather than
+   from this arithmetic. The client also logs both every 30 s on one line
+   beside its resident set size and its cgroup's `memory.events` `max` count
    (`[MEM] rss_kb=… h3_recv_buffered=… flows_paused=… cg_max_events=…`;
    `rss_kb` reads 0 off Linux and `cg_max_events` -1 on Android and wherever
    no cgroup v2 memory controller is visible), so growth toward the limit is
    attributable from the client's own log.
 
-Operators who need the hard bound to fit the box should lower `TcpMaxFlows` or
-`RecvBodyBufMax`, in that order — `TcpMaxFlows` also bounds the per-flow uplink
-term above, so it buys more per unit of reduction. A `RecvBodyBufMax` below
-the stream receive window lets an ordinary burst latch the pause, at some cost
-in throughput; one a few multiples above it engages only for a sink that has
-really fallen behind.
+`[Hybrid] RecvTotalBufMax` (default `0` = off) bounds the aggregate directly,
+per connection. When the connection's unconsumed body reaches it, every flow
+holding more than 64 KiB is paused as at `RecvBodyBufMax`, until the total
+falls below half; flows at or under 64 KiB keep reading, so a few stalled
+large transfers do not starve the small ones. Each flow receiving at the time
+can overshoot by its 64 KiB floor plus one 4 KiB read. The value bounds body,
+not process memory: each buffered byte also carries allocator overhead, and
+each paused flow holds transport and lane state besides. A starting point:
+
+```
+RecvTotalBufMax ≈ (MemoryMax − baseline RSS) / 2
+```
+
+then confirm with `h3_recv_buffered_bytes` and the `[MEM]` line under the
+expected number of paused flows.
+
+Operators who need the hard bound to fit the box should set `RecvTotalBufMax`,
+or else lower `TcpMaxFlows` or `RecvBodyBufMax`, in that order — `TcpMaxFlows`
+also bounds the per-flow uplink term above, so it buys more per unit of
+reduction. A `RecvBodyBufMax` below the stream receive window lets an ordinary
+burst latch the pause, at some cost in throughput; one a few multiples above
+it engages only for a sink that has really fallen behind.
 
 ### 3a. Raising `TcpMaxFlows` toward the desktop/router ceiling
 
@@ -534,11 +549,12 @@ isolation (the shipped profile, §5c, applies both together):
   simultaneously saturated at `TCP_SND_BUF` before the shared segment pool is exhausted,
   after which `tcp_write` backpressure — not a config cap — limits further flows from fully
   using their send buffer concurrently.
-- **`RecvBodyBufMax` is per request, not per connection.** The aggregate H3
-  receive bound is the per-request value times the number of simultaneously
-  backpressured flows (§3), with no ceiling below `TcpMaxFlows`. A
-  connection-level aggregate cap would be the tighter shape; it is deliberately
-  not built until `tcp_flows_paused` shows a multiplier that warrants it.
+- **`RecvBodyBufMax` is per request, not per connection.** On its own, the
+  aggregate H3 receive bound is the per-request value times the number of
+  simultaneously backpressured flows (§3), with no ceiling below
+  `TcpMaxFlows`. `RecvTotalBufMax` is the connection-level aggregate cap
+  (§3); with it set the per-connection total is held near that value instead,
+  plus up to about 68 KiB per flow receiving at the time.
 - **The QPACK blocked-buffer budget is separate.** `max_blocked_buf_per_stream`
   / `max_blocked_buf_per_conn` (`xqc_h3_conn.h`) bound header data held while a
   stream waits on dynamic-table insertions; `RecvBodyBufMax` does not apply to

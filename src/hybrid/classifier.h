@@ -271,6 +271,13 @@ typedef struct {
      * flow-control credit is issued. */
     uint32_t recv_body_buf_max;
 
+    /* [Hybrid] RecvTotalBufMax: per-connection high-water, in bytes, on the
+     * same unconsumed body, summed over all of the connection's requests.
+     * Consumed by BOTH endpoints, like recv_body_buf_max; on the server it
+     * applies to each client session's connection separately. 0 = off.
+     * Passed through to xqc_conn_settings_t.h3_recv_total_buf_max. */
+    uint32_t recv_total_buf_max;
+
     /* Server-only egress ACL (connect-tcp destination policy).
      * egress_allow punches holes through the mandatory default-deny;
      * egress_deny adds extra blocks. Ignored by client-side classify(). */
@@ -320,7 +327,8 @@ mqvpn_hybrid_config_default(mqvpn_hybrid_config_t *cfg)
     cfg->tcp_idle_timeout_sec = 300;
     cfg->tcp_connect_timeout_sec = MQVPN_TCP_CONNECT_TIMEOUT_SEC_DEFAULT;
     cfg->tcp_max_global_flows = MQVPN_TCP_MAX_GLOBAL_FLOWS_DEFAULT;
-    cfg->recv_body_buf_max = 0; /* MQVPN_RECV_BODY_BUF_MAX_DEFAULT: off */
+    cfg->recv_body_buf_max = 0;  /* MQVPN_RECV_BODY_BUF_MAX_DEFAULT: off */
+    cfg->recv_total_buf_max = 0; /* MQVPN_RECV_TOTAL_BUF_MAX_DEFAULT: off */
     /* n_egress_allow / n_egress_deny already 0 from the memset above. */
 }
 
@@ -379,9 +387,10 @@ mqvpn_hybrid_config_sanitize(mqvpn_hybrid_config_t *cfg, const char **names,
     }
     /* Postcondition pinned: a sanitized config always passes validate —
      * the four resets above cover exactly validate's four checks. Keep the
-     * two functions in lockstep when adding fields. recv_body_buf_max is
-     * deliberately in neither: like tcp_idle_timeout_sec, 0 is a legitimate
-     * "off" value, and its upper bound is enforced by the loader. */
+     * two functions in lockstep when adding fields. recv_body_buf_max and
+     * recv_total_buf_max are deliberately in neither: like
+     * tcp_idle_timeout_sec, 0 is a legitimate "off" value, and their upper
+     * bounds are enforced by the loader. */
     return n;
 }
 

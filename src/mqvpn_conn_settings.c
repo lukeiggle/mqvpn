@@ -174,6 +174,11 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
      * endpoints -- each terminates one direction of the lane. */
     out->h3_recv_body_buf_max = in->h3_recv_body_buf_max;
 
+    /* Opt-in per-connection H3 receive high-water over the same body. Also a
+     * straight pass-through: xquic owns which requests it pauses and when it
+     * releases them. 0 (default) leaves behaviour unchanged. */
+    out->h3_recv_total_buf_max = in->h3_recv_total_buf_max;
+
     /* --- congestion control ---
      * Invalid/out-of-range values fall back to BBR2, matching the old
      * `default:` case. Normalized up front so the switch can drop

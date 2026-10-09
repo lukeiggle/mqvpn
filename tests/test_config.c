@@ -2183,6 +2183,74 @@ test_hybrid_recv_body_buf_max(void)
     ASSERT_EQ_ULL(cfg.hybrid.recv_body_buf_max, 1048576, "RecvBodyBufMax json stored");
 }
 
+/* [Hybrid] RecvTotalBufMax: parsed and defaulted off. The whole uint32 range
+ * is meaningful (it is a per-connection memory budget, so there is no typo
+ * ceiling below the type's own), and a value the type cannot hold is
+ * rejected like every other ranged key. */
+static void
+test_hybrid_recv_total_buf_max(void)
+{
+    mqvpn_file_config_t cfg;
+
+    /* Unset: off. */
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_ULL(cfg.hybrid.recv_total_buf_max, MQVPN_RECV_TOTAL_BUF_MAX_DEFAULT,
+                  "RecvTotalBufMax default");
+    ASSERT_EQ_ULL(cfg.hybrid.recv_total_buf_max, 0, "RecvTotalBufMax defaults off");
+
+    char *p = write_tmp("[Hybrid]\nEnabled = true\n");
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "RecvTotalBufMax unset load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.recv_total_buf_max, 0, "RecvTotalBufMax unset stays off");
+
+    /* Explicit value passes through, independently of RecvBodyBufMax. */
+    p = write_tmp("[Hybrid]\nEnabled = true\nRecvBodyBufMax = 4194304\n"
+                  "RecvTotalBufMax = 805306368\n");
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "RecvTotalBufMax in-range load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.recv_total_buf_max, 805306368,
+                  "RecvTotalBufMax in-range stored");
+    ASSERT_EQ_ULL(cfg.hybrid.recv_body_buf_max, 4194304,
+                  "RecvTotalBufMax leaves RecvBodyBufMax alone");
+
+    /* The top of the type is accepted. */
+    p = write_tmp("[Hybrid]\nRecvTotalBufMax = 4294967295\n");
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "RecvTotalBufMax u32 max load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.recv_total_buf_max, 4294967295ULL,
+                  "RecvTotalBufMax u32 max accepted");
+
+    /* Explicit 0 is a real disable. */
+    p = write_tmp("[Hybrid]\nEnabled = true\nRecvTotalBufMax = 0\n");
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "RecvTotalBufMax zero load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.recv_total_buf_max, 0, "RecvTotalBufMax explicit 0");
+
+    /* Beyond uint32: rejected, warning-only, value never written. */
+    p = write_tmp("[Hybrid]\nEnabled = true\nRecvTotalBufMax = 4294967296\n");
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load(&cfg, p);
+    unlink(p);
+    ASSERT_EQ_INT(rc, 0, "RecvTotalBufMax overflow is warning-only");
+    ASSERT_EQ_ULL(cfg.hybrid.recv_total_buf_max, 0, "RecvTotalBufMax overflow ignored");
+
+    /* JSON: same key inside the bounded "hybrid" object. */
+    mqvpn_config_defaults(&cfg);
+    rc = mqvpn_config_load_json_filecfg(
+        &cfg, "{\"hybrid\":{\"recv_total_buf_max\":268435456}}");
+    ASSERT_EQ_INT(rc, 0, "RecvTotalBufMax json load ok");
+    ASSERT_EQ_ULL(cfg.hybrid.recv_total_buf_max, 268435456,
+                  "RecvTotalBufMax json stored");
+}
+
 static void
 test_advanced_recv_rate_limit(void)
 {
@@ -3064,6 +3132,7 @@ main(void)
     test_hybrid_defaults_when_absent();
     test_hybrid_section_parse();
     test_hybrid_recv_body_buf_max();
+    test_hybrid_recv_total_buf_max();
     test_advanced_recv_rate_limit();
     test_advanced_udp_gso();
     test_advanced_xquic_quiet_stream_reset();

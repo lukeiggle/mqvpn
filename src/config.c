@@ -665,6 +665,11 @@ static const cfg_key_desc_t cfg_keys[] = {
      * default. */
     CFG_U32_MAX(SEC_HYBRID, "RecvBodyBufMax", "recv_body_buf_max",
                 hybrid.recv_body_buf_max, MQVPN_RECV_BODY_BUF_MAX_MAX),
+    /* Per-connection cap on the same body, summed over the connection's
+     * requests. A memory budget rather than a per-flow knob, so any uint32
+     * is meaningful and only the type bounds it. 0 = off. */
+    CFG_U32(SEC_HYBRID, "RecvTotalBufMax", "recv_total_buf_max",
+            hybrid.recv_total_buf_max),
     /* [Advanced] — JSON side lives inside the bounded "advanced" object.
      * Max mirrors the public setter: above it, xquic's rate x srtt(us)
      * u64 window product overflows (see MQVPN_RECV_RATE_LIMIT_MAX). */

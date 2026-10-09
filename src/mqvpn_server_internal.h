@@ -138,9 +138,12 @@ typedef struct {
                                        * client's tcp_lane (config.hybrid); 0 = disabled,
                                        * see the field comment in classifier.h */
     uint32_t recv_body_buf_max;       /* server's own per-request receive cap
-                                       * (config.hybrid); 0 = unset. Gates the
+                                       * (config.hybrid); 0 = unset. Either
+                                       * this or recv_total_buf_max gates the
                                        * idle sweep's exemption for flows
                                        * withheld by the peer's credit. */
+    uint32_t recv_total_buf_max;      /* server's own per-connection receive
+                                       * cap (config.hybrid); 0 = unset. */
     int global_fd_budget;             /* mqvpn_server_egress_fd_budget(s) */
 } svr_tcp_egress_srv_ctx_t;
 

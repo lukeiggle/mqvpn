@@ -156,7 +156,9 @@ typedef struct {
                                   * (downlink_paused). This is the count that
                                   * decides whether the aggregate H3 receive
                                   * budget ([Hybrid] RecvBodyBufMax times
-                                  * this) is anywhere near its worst case —
+                                  * this, capped per connection by
+                                  * RecvTotalBufMax) is anywhere near its
+                                  * worst case —
                                   * surfaced through mqvpn_client_get_stats as
                                   * the public tcp_flows_paused stat. */
 } mqvpn_tcp_lane_stats_t;
@@ -265,9 +267,10 @@ int mqvpn_tcp_lane_on_h3_writable(mqvpn_tcp_lane_t *lane, void *stream);
  * (deliberately not draining). Not draining does NOT by itself backpressure
  * the server: xquic releases flow-control credit on its own transport read,
  * not on recv_body, so the response keeps arriving into xquic's per-request
- * body buffer. The server is held back only when [Hybrid] RecvBodyBufMax is
- * set, which makes xquic stop reading the stream at that high-water; with it
- * at 0 the buffering above a paused flow is unbounded.
+ * body buffer. The server is held back only when [Hybrid] RecvBodyBufMax /
+ * RecvTotalBufMax is set, which makes xquic stop reading the stream at the
+ * per-request or per-connection high-water; with both at 0 the buffering
+ * above a paused flow is unbounded.
  * Also called from the sndbuf-recovered resume path (mqvpn_tcp_lane's own
  * lwIP sent callback) to continue draining after a pause. Returns 0 on
  * success/no-op, -1 if the flow is no longer live when this returns — either

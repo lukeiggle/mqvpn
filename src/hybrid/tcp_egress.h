@@ -93,12 +93,12 @@ void svr_tcp_egress_fd_ready(mqvpn_server_t *server, int fd, void *fd_ctx, int r
  * ETIMEDOUT (-> 504); any EGRESS_FLOW_ACTIVE flow whose last_activity_us has
  * not advanced within config.hybrid.tcp_idle_timeout_sec (0 = disabled) has
  * its H3 stream closed (no 5xx — it already sent its 200; see
- * svr_tcp_egress_on_idle_evict). When the server's own receive cap
- * ([Hybrid] RecvBodyBufMax) is set, a flow holding uplink bytes the
- * transport refused (peer credit or a full send queue) is waiting on the
- * peer rather than idle: it is kept and logged once. One list, one tick
- * function; the walk is unlink-safe (a flow can be destroyed mid-walk by the
- * timeout/eviction it just hit). */
+ * svr_tcp_egress_on_idle_evict). When either of the server's own receive
+ * caps ([Hybrid] RecvBodyBufMax / RecvTotalBufMax) is set, a flow holding
+ * uplink bytes the transport refused (peer credit or a full send queue) is
+ * waiting on the peer rather than idle: it is kept and logged once. One list,
+ * one tick function; the walk is unlink-safe (a flow can be destroyed
+ * mid-walk by the timeout/eviction it just hit). */
 void svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us);
 
 /* Full teardown for exactly one flow: unregisters the fd from the platform

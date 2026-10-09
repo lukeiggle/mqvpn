@@ -351,9 +351,10 @@ typedef struct svr_tcp_egress_flow_s {
                                    * flush). A pure readiness notify that
                                    * moves zero bytes (e.g. a writable event
                                    * that still can't drain the stash) does
-                                   * NOT refresh this. When the server's own
-                                   * receive cap is configured
-                                   * (recv_body_buf_max != 0), a flow holding
+                                   * NOT refresh this. When either of the
+                                   * server's own receive caps is configured
+                                   * (recv_body_buf_max or
+                                   * recv_total_buf_max != 0), a flow holding
                                    * uplink bytes the transport refused (peer
                                    * credit or a full send queue;
                                    * uplink_withheld) is waiting on the peer
@@ -1392,20 +1393,21 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
             /* Wraparound-safe age test (now_us > last_activity_us guard),
              * same form as the client's mqvpn_tcp_lane_tick sweep.
              *
-             * With the server's own receive cap configured
-             * (recv_body_buf_max != 0), a flow with uplink_withheld set is
-             * waiting on the peer, not idle: it holds origin bytes the
-             * transport refused (the client's stream credit is used up, or
-             * the send queue is full). A client that has paused reading
-             * this stream at its per-request high-water grants credit in
-             * bursts, and a slow consumer behind it can leave the gap
-             * between bursts longer than the idle timeout. Such a flow is
-             * kept, and logged once so a client that never resumes is
-             * visible. It stays collectable by the client resetting the
-             * stream (its own lane idle eviction included) and by the
-             * connection closing. Without the cap the sweep evicts it as
-             * before. */
-            if (ef->uplink_withheld && ctx.recv_body_buf_max != 0) {
+             * With either of the server's own receive caps configured
+             * (recv_body_buf_max or recv_total_buf_max != 0), a flow with
+             * uplink_withheld set is waiting on the peer, not idle: it
+             * holds origin bytes the transport refused (the client's stream
+             * credit is used up, or the send queue is full). A client that
+             * has paused reading this stream at its per-request or
+             * per-connection high-water grants credit in bursts, and a slow
+             * consumer behind it can leave the gap between bursts longer
+             * than the idle timeout. Such a flow is kept, and logged once so
+             * a client that never resumes is visible. It stays collectable
+             * by the client resetting the stream (its own lane idle eviction
+             * included) and by the connection closing. Without either cap
+             * the sweep evicts it as before. */
+            if (ef->uplink_withheld &&
+                (ctx.recv_body_buf_max != 0 || ctx.recv_total_buf_max != 0)) {
                 if (!ef->withheld_warned) {
                     ef->withheld_warned = 1;
                     char peer[64];

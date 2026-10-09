@@ -90,11 +90,13 @@ test_now_us(void)
     return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
 }
 
-/* h3_recv_body_buf_max for the probe connection harness_start builds (0 =
- * xquic default, which every test but the parked-flow ones runs with). Set
- * it before harness_start and reset it after; harness_start copies it into
- * the probe's conn settings at connect time. */
+/* h3_recv_body_buf_max and h3_recv_total_buf_max for the probe connection
+ * harness_start builds (0 = xquic default, which every test but the
+ * parked-flow ones runs with). Set them before harness_start and reset them
+ * after; harness_start copies them into the probe's conn settings at connect
+ * time. */
 static uint32_t g_probe_h3_recv_body_buf_max = 0;
+static uint32_t g_probe_h3_recv_total_buf_max = 0;
 
 /* Counts inner-IP packets the server forwarded out of the tunnel — the
  * observable the tunnel-survival regression test asserts on. */
@@ -803,6 +805,7 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
             .cc = MQVPN_CC_BBR2,
             .init_max_path_id = 0,
             .h3_recv_body_buf_max = g_probe_h3_recv_body_buf_max,
+            .h3_recv_total_buf_max = g_probe_h3_recv_total_buf_max,
         };
         mqvpn_build_conn_settings(&cs_in, &cs);
 
@@ -1312,6 +1315,14 @@ harness_cfg_allow_127_idle_timeout_1_recv_cap(mqvpn_config_t *cfg)
 {
     harness_cfg_allow_127_idle_timeout_1(cfg);
     cfg->hybrid.recv_body_buf_max = 16384;
+}
+
+/* The same, with only the per-connection cap ([Hybrid] RecvTotalBufMax). */
+static void
+harness_cfg_allow_127_idle_timeout_1_recv_total_cap(mqvpn_config_t *cfg)
+{
+    harness_cfg_allow_127_idle_timeout_1(cfg);
+    cfg->hybrid.recv_total_buf_max = 1048576;
 }
 
 /* Injects an INVALID hybrid scalar the way the INI/JSON bridge does —
@@ -2779,6 +2790,45 @@ TEST(mqvpn_tcp_parked_flow_idle_evicted_without_server_cap)
     free(h.probe.raw_recv_buf);
 }
 
+/* The per-connection cap alone is enough to keep the exemption: a client
+ * paused by its connection total withholds credit exactly as one paused at
+ * its per-request high-water does. Here the probe is paused by its own
+ * total (no per-request cap on either side) and the server sets only
+ * RecvTotalBufMax; the withheld flow outlives the 1 s idle timeout. */
+TEST(mqvpn_tcp_parked_flow_not_idle_evicted_total_cap_only)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    g_probe_h3_recv_total_buf_max = 131072;
+    int start_rc = harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                                 harness_cfg_allow_127_idle_timeout_1_recv_total_cap);
+    g_probe_h3_recv_total_buf_max = 0;
+    ASSERT_EQ(start_rc, 0);
+    h.probe.path = path;
+    h.probe.suppress_body_drain = 1;
+
+    uint64_t sent_total = 0;
+    parked_flow_open_and_flood(&h, &sink, &sent_total);
+    ASSERT_EQ(h.probe.request_closed, 0);
+
+    /* Well past the 1 s idle timeout, on the real wall clock. */
+    uint64_t start_us = test_now_us();
+    while (test_now_us() - start_us < 2500000ull) {
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    ASSERT_EQ(h.probe.request_closed, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
 /* ── svr_tcp_egress_errno_to_status — pure function ── */
 
 TEST(errno_to_status_maps_known_codes)
@@ -3389,6 +3439,7 @@ main(void)
     run_mqvpn_tcp_two_flow_same_conn_idle_eviction();
     run_mqvpn_tcp_parked_flow_not_idle_evicted();
     run_mqvpn_tcp_parked_flow_idle_evicted_without_server_cap();
+    run_mqvpn_tcp_parked_flow_not_idle_evicted_total_cap_only();
     run_errno_to_status_maps_known_codes();
     run_non_tunnel_close_keeps_tunnel_established();
     run_connect_ip_v6_address_assign_is_slash_128();

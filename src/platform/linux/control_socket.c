@@ -258,7 +258,7 @@ ctrl_cmd_get_stats(yyjson_val *req, char *resp, size_t resp_len, ctrl_socket_t *
     /* Unconsumed H3 receive body held inside xquic, and the count of lane
      * flows backpressured enough to be accumulating it. Read together: the
      * second is the multiplier on the first's worst case ([Hybrid]
-     * RecvBodyBufMax times it). */
+     * RecvBodyBufMax times it, capped per connection by RecvTotalBufMax). */
     ok &= yyjson_mut_obj_add_uint(doc, root, "h3_recv_buffered_bytes",
                                   st.h3_recv_buffered_bytes);
     ok &= yyjson_mut_obj_add_uint(doc, root, "tcp_flows_paused", st.tcp_flows_paused);

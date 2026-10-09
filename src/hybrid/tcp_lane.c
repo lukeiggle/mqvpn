@@ -485,8 +485,9 @@ mqvpn_tcp_lane_tick(mqvpn_tcp_lane_t *lane, uint64_t now_us)
                  * notify — if the flow's own sndbuf is already empty (no
                  * more ACKs coming) AND no further READ_BODY notify arrives
                  * (the request's body is fully drained, or, with [Hybrid]
-                 * RecvBodyBufMax set, xquic has paused reading this request
-                 * at the high-water and so stopped notifying), NEITHER
+                 * RecvBodyBufMax / RecvTotalBufMax set, xquic has paused
+                 * reading this request at a high-water and so stopped
+                 * notifying), NEITHER
                  * driver ever fires again and the flow would stall holding
                  * its stash until idle eviction (or forever with
                  * tcp_idle_timeout_sec == 0). This 1 Hz sweep is the
@@ -836,9 +837,10 @@ tcp_lane_downlink_pump_status(mqvpn_tcp_lane_t *lane, void *stream)
              * declining to drain leaves the server sending at full rate into
              * xquic's body_buf, where one slow LAN sink can park the whole
              * response in client heap. Backpressure exists only when
-             * [Hybrid] RecvBodyBufMax is set: xquic then stops reading this
-             * request's stream at the high-water, stops issuing credit, and
-             * the server blocks at the stream window. With it at 0 the
+             * [Hybrid] RecvBodyBufMax / RecvTotalBufMax is set: xquic then
+             * stops reading this request's stream at the per-request or
+             * per-connection high-water, stops issuing credit, and the
+             * server blocks at the stream window. With both at 0 the
              * buffering above this pause is unbounded.
              *
              * A FIN cannot be lost across the pause, in either shape:

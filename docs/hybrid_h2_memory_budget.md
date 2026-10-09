@@ -210,12 +210,13 @@ RecvTotalBufMax ≈ (MemoryMax − baseline RSS) / 2
 then confirm with `h3_recv_buffered_bytes` and the `[MEM]` line under the
 expected number of paused flows.
 
-Operators who need the hard bound to fit the box should set `RecvTotalBufMax`,
-or else lower `TcpMaxFlows` or `RecvBodyBufMax`, in that order — `TcpMaxFlows`
-also bounds the per-flow uplink term above, so it buys more per unit of
-reduction. A `RecvBodyBufMax` below the stream receive window lets an ordinary
-burst latch the pause, at some cost in throughput; one a few multiples above
-it engages only for a sink that has really fallen behind.
+Operators who need the hard bound to fit the box should set `RecvTotalBufMax`
+first: it bounds the receive aggregate directly, whatever the number of
+backpressured flows. Without it, lower `TcpMaxFlows` before `RecvBodyBufMax`:
+`TcpMaxFlows` also bounds the per-flow uplink term above, so it buys more per
+unit of reduction. A `RecvBodyBufMax` below the stream receive window lets an
+ordinary burst latch the pause, at some cost in throughput; one a few
+multiples above it engages only for a sink that has really fallen behind.
 
 ### 3a. Raising `TcpMaxFlows` toward the desktop/router ceiling
 

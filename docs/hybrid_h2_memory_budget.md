@@ -189,10 +189,15 @@ things keep them theoretical, and the third is the one that matters:
    aggregate cap `RecvTotalBufMax` below, sized from these gauges rather than
    from this arithmetic. The client also logs both every 30 s on one line
    beside its resident set size and its cgroup's `memory.events` `max` count
-   (`[MEM] rss_kb=… h3_recv_buffered=… flows_paused=… cg_max_events=…`;
-   `rss_kb` reads 0 off Linux and `cg_max_events` -1 on Android and wherever
-   no cgroup v2 memory controller is visible), so growth toward the limit is
-   attributable from the client's own log.
+   (`[MEM] rss_kb=… h3_recv_buffered=… flows_paused=… cg_max_events=…
+   lane_mem_blocked=… lane_mem_errs=…`; `rss_kb` reads 0 off Linux and
+   `cg_max_events` -1 on Android and wherever no cgroup v2 memory controller
+   is visible), so growth toward the limit is attributable from the client's
+   own log. `lane_mem_blocked` is the part of `flows_paused` whose last
+   downlink write was refused because the shared `MEMP_NUM_TCP_SEG` pool was
+   empty, rather than because the flow's own send queue was full, and
+   `lane_mem_errs` counts those refusals. A non-zero `lane_mem_blocked` means
+   flows are waiting on each other's segments, not on their own sinks (§6).
 
 `[Hybrid] RecvTotalBufMax` (default `0` = off) bounds the aggregate directly,
 per connection. When the connection's unconsumed body reaches it, every flow

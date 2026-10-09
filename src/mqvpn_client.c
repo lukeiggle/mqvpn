@@ -4602,11 +4602,22 @@ tick_mem_log(mqvpn_client_t *c)
     c->next_mem_log_us = now + MQVPN_MEM_LOG_INTERVAL_US;
     mqvpn_stats_t st;
     if (mqvpn_client_get_stats(c, &st) != MQVPN_OK) return;
+    /* Lane flows refused by an empty lwIP segment pool (a subset of
+     * flows_paused) and the running count of such refusals. */
+    uint64_t lane_mem_blocked = 0, lane_mem_errs = 0;
+#ifdef MQVPN_HYBRID_TCP_LANE_ENABLED
+    if (c->conn && c->conn->tcp_lane) {
+        mqvpn_tcp_lane_stats_t ls;
+        mqvpn_tcp_lane_get_stats(c->conn->tcp_lane, &ls);
+        lane_mem_blocked = ls.flows_mem_blocked;
+        lane_mem_errs = ls.downlink_mem_errors;
+    }
+#endif
     LOG_I(c,
           "[MEM] rss_kb=%llu h3_recv_buffered=%" PRIu64 " flows_paused=%" PRIu64
-          " cg_max_events=%lld",
+          " cg_max_events=%lld lane_mem_blocked=%" PRIu64 " lane_mem_errs=%" PRIu64,
           client_rss_kb(), st.h3_recv_buffered_bytes, st.tcp_flows_paused,
-          client_cgroup_mem_max_events());
+          client_cgroup_mem_max_events(), lane_mem_blocked, lane_mem_errs);
 }
 
 int

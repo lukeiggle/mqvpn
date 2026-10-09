@@ -180,6 +180,11 @@ typedef struct mqvpn_tcp_flow {
                                       * deferred until the low-water resume */
     int uplink_withheld;
     int downlink_paused;
+    /* Set while downlink_paused because the last tcp_write was refused for
+     * an empty MEMP_TCP_SEG pool rather than this pcb's own send-queue
+     * limit (tcp_lane_downlink_refused). Cleared with downlink_paused and
+     * by any later refusal the pcb's own limits explain. */
+    int downlink_mem_blocked;
     int fin_sent_to_h3;
     int fin_received_from_h3;
     int tcp_fin_seen;

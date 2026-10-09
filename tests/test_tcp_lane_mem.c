@@ -450,6 +450,65 @@ test_pool_exhaustion_strands_flows(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* A write refused because the shared pool is empty, not because the pcb
+ * reached its own queue limit, bumps downlink_mem_errors and marks the flow
+ * in flows_mem_blocked until its write gets in. */
+static void
+test_mem_blocked_counted(void)
+{
+    mqvpn_tcp_lane_t *lane = new_lane();
+    static test_flow_t bulk[N_BULK];
+    static test_flow_t probe;
+    int ok = open_all(lane, bulk, N_BULK, &probe);
+    ASSERT_TRUE(ok, "count: flows opened");
+    if (!ok) {
+        mqvpn_tcp_lane_free(lane);
+        return;
+    }
+    for (int i = 0; i < N_BULK; i++) {
+        pump(lane, &bulk[i]);
+    }
+    int own_limit = 0, pool_blocked = 0;
+    for (int i = 0; i < N_BULK; i++) {
+        if (!bulk[i].f->downlink_paused) continue;
+        if (bulk[i].f->pcb->snd_queuelen + READ_SEGS + 1 > TCP_SND_QUEUELEN) {
+            own_limit++;
+        } else {
+            pool_blocked++;
+        }
+    }
+    mqvpn_tcp_lane_stats_t st;
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_TRUE(own_limit >= 8, "count: flows at their own queue limit");
+    ASSERT_TRUE(pool_blocked >= 3, "count: flows refused by the pool");
+    ASSERT_EQ_INT(st.flows_paused, own_limit + pool_blocked,
+                  "count: flows_paused covers both");
+    ASSERT_EQ_INT(st.flows_mem_blocked, pool_blocked,
+                  "count: only pool refusals are mem-blocked");
+    ASSERT_EQ_INT(st.downlink_mem_errors, pool_blocked,
+                  "count: one error per pool refusal");
+
+    /* Responses end; the sinks read everything; the sweep lets the refused
+     * flows' stashed reads in, and they leave the gauge. */
+    for (int i = 0; i < N_BULK; i++) {
+        bulk[i].req.bulk = 0;
+    }
+    for (int k = 0; k < 100000 && pool_free_segs(64) < 64; k++) {
+        for (int i = 0; i < N_BULK; i++) {
+            if (bulk[i].f->pcb->snd_nxt != bulk[i].f->pcb->lastack)
+                host_ack(&bulk[i], 65535);
+        }
+    }
+    g_now_us += 1000000;
+    mqvpn_tcp_lane_tick(lane, g_now_us);
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_EQ_INT(st.flows_mem_blocked, 0, "count: flushed flows leave the gauge");
+    ASSERT_EQ_INT(st.flows_paused, 0, "count: nothing left paused");
+    ASSERT_EQ_INT(st.downlink_mem_errors, pool_blocked, "count: the counter only grows");
+
+    mqvpn_tcp_lane_free(lane);
+}
+
 int
 main(void)
 {
@@ -459,6 +518,7 @@ main(void)
         return 1;
     }
     test_pool_exhaustion_strands_flows();
+    test_mem_blocked_counted();
     ASSERT_EQ_INT(pool_free_segs(64), 64, "teardown: every test returned its segments");
     mqvpn_lwip_ctx_free(g_ctx);
     fprintf(stderr, "test_tcp_lane_mem: %d passed, %d failed\n", g_pass, g_fail);

@@ -1181,7 +1181,8 @@ mem_count_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
     if (!p) return;
     g_mem_lines++;
     if (level != MQVPN_LOG_INFO || !strstr(p, "[MEM] rss_kb=") ||
-        !strstr(p, " h3_recv_buffered=0 flows_paused=0 cg_max_events=")) {
+        !strstr(p, " h3_recv_buffered=0 flows_paused=0 cg_max_events=") ||
+        !strstr(p, " lane_mem_blocked=0 lane_mem_errs=0")) {
         g_mem_shape_ok = 0;
     }
 }

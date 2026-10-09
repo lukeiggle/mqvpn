@@ -146,21 +146,29 @@ typedef struct {
     uint64_t flows_rejected_cap;
     uint64_t flows_rejected_other;
     uint64_t flows_idle_evicted;
-    uint64_t raw_markers_active; /* gauge, same derivation: sticky-RAW markers
-                                  * currently in the table — surfaced through
-                                  * mqvpn_client_get_stats as the public
-                                  * raw_markers_active stat */
-    uint64_t flows_paused;       /* gauge, same derivation: flows whose
-                                  * downlink drain is stopped on lwIP
-                                  * sndbuf/ERR_MEM backpressure
-                                  * (downlink_paused). This is the count that
-                                  * decides whether the aggregate H3 receive
-                                  * budget ([Hybrid] RecvBodyBufMax times
-                                  * this, capped per connection by
-                                  * RecvTotalBufMax) is anywhere near its
-                                  * worst case —
-                                  * surfaced through mqvpn_client_get_stats as
-                                  * the public tcp_flows_paused stat. */
+    uint64_t raw_markers_active;  /* gauge, same derivation: sticky-RAW markers
+                                   * currently in the table — surfaced through
+                                   * mqvpn_client_get_stats as the public
+                                   * raw_markers_active stat */
+    uint64_t flows_paused;        /* gauge, same derivation: flows whose
+                                   * downlink drain is stopped on lwIP
+                                   * sndbuf/ERR_MEM backpressure
+                                   * (downlink_paused). This is the count that
+                                   * decides whether the aggregate H3 receive
+                                   * budget ([Hybrid] RecvBodyBufMax times
+                                   * this, capped per connection by
+                                   * RecvTotalBufMax) is anywhere near its
+                                   * worst case —
+                                   * surfaced through mqvpn_client_get_stats as
+                                   * the public tcp_flows_paused stat. */
+    uint64_t flows_mem_blocked;   /* gauge, same derivation: the subset of
+                                   * flows_paused whose last downlink
+                                   * tcp_write was refused because lwIP's
+                                   * shared MEMP_TCP_SEG pool was empty, not
+                                   * because the flow reached its own
+                                   * TCP_SND_QUEUELEN */
+    uint64_t downlink_mem_errors; /* counter: downlink tcp_write calls
+                                   * refused for that reason */
 } mqvpn_tcp_lane_stats_t;
 
 /* client_ctx is opaque to tcp_lane.c's callers outside mqvpn_client.c; it is

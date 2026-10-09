@@ -556,6 +556,7 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
      * a status-timer call, never on the data path, so the walk's
      * O(buckets + flows) cost is not measurable. */
     out->flows_paused = 0;
+    out->flows_mem_blocked = 0;
     for (uint32_t b = 0; b < lane->n_buckets; b++) {
         for (const mqvpn_tcp_flow_t *f = lane->buckets[b]; f; f = f->next) {
             /* CLOSING entries are routing residency only, never paused
@@ -563,6 +564,9 @@ mqvpn_tcp_lane_get_stats(const mqvpn_tcp_lane_t *lane, mqvpn_tcp_lane_stats_t *o
              * from ever counting. */
             if (f->state != TCP_FLOW_CLOSING && f->downlink_paused) {
                 out->flows_paused++;
+                if (f->downlink_mem_blocked) {
+                    out->flows_mem_blocked++;
+                }
             }
         }
     }
@@ -670,6 +674,34 @@ tcp_lane_downlink_maybe_shutdown(mqvpn_tcp_flow_t *f)
     return TCP_LANE_FLOW_LIVE;
 }
 
+/* tcp_write returns ERR_MEM both when this pcb's own send queue is full
+ * (TCP_SND_QUEUELEN, counted in pbufs) and when lwIP's MEMP_TCP_SEG pool,
+ * which every flow shares, has no segment left (tcp_create_segment). The
+ * two need different remedies, so tell them apart: a write of len adds at
+ * most one pbuf per segment at tcp_write's own MSS choice (tcp_out.c) plus
+ * one for chaining onto the last unsent segment. A refusal that the pcb's
+ * queue length does not explain is the pool. */
+static int
+tcp_lane_write_pbufs(const struct tcp_pcb *pcb, u16_t len)
+{
+    u16_t mss = LWIP_MIN(pcb->mss, TCPWND_MIN16(pcb->snd_wnd_max / 2));
+    if (mss == 0) {
+        mss = pcb->mss;
+    }
+    return mss ? (len + mss - 1) / mss + 1 : 1;
+}
+
+static void
+tcp_lane_downlink_refused(mqvpn_tcp_flow_t *f, u16_t len)
+{
+    int pool =
+        f->pcb->snd_queuelen + tcp_lane_write_pbufs(f->pcb, len) <= TCP_SND_QUEUELEN;
+    if (pool) {
+        f->lane->stats.downlink_mem_errors++;
+    }
+    f->downlink_mem_blocked = pool;
+}
+
 /* Drain the flow's H3 response body into lwIP. Stops at the first
  * would-block (MQVPN_TCP_LANE_H3_RECV_AGAIN — nothing more buffered right
  * now; the next READ_BODY/EMPTY_FIN notify re-fires) or the first
@@ -722,6 +754,7 @@ tcp_lane_downlink_drain(mqvpn_tcp_flow_t *f)
                     return mqvpn_tcp_lane_on_relay_error(f);
                 }
                 f->downlink_paused = 1;
+                f->downlink_mem_blocked = 0;
                 break;
             }
             err_t werr =
@@ -734,6 +767,7 @@ tcp_lane_downlink_drain(mqvpn_tcp_flow_t *f)
                     return mqvpn_tcp_lane_on_relay_error(f);
                 }
                 f->downlink_paused = 1;
+                tcp_lane_downlink_refused(f, (u16_t)n);
                 break;
             }
             if (werr != ERR_OK) {
@@ -773,11 +807,13 @@ static tcp_lane_flow_status_t
 tcp_lane_downlink_stash_retry(mqvpn_tcp_flow_t *f)
 {
     if ((size_t)MQVPN_TCP_LANE_TCP_SNDBUF(f->pcb) < (size_t)f->downlink_stash_len) {
+        f->downlink_mem_blocked = 0;
         return TCP_LANE_FLOW_LIVE; /* still not enough room; wait and retry later */
     }
     err_t werr = MQVPN_TCP_LANE_TCP_WRITE(f->pcb, f->downlink_stash,
                                           f->downlink_stash_len, TCP_WRITE_FLAG_COPY);
     if (werr == ERR_MEM) {
+        tcp_lane_downlink_refused(f, f->downlink_stash_len);
         return TCP_LANE_FLOW_LIVE; /* transient; retry later */
     }
     if (werr != ERR_OK) {
@@ -786,6 +822,7 @@ tcp_lane_downlink_stash_retry(mqvpn_tcp_flow_t *f)
     MQVPN_TCP_LANE_TCP_OUTPUT(f->pcb);
     f->downlink_stash_len = 0;
     f->downlink_paused = 0;
+    f->downlink_mem_blocked = 0;
     return TCP_LANE_FLOW_LIVE;
 }
 

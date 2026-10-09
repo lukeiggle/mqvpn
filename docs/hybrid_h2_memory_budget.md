@@ -190,14 +190,20 @@ things keep them theoretical, and the third is the one that matters:
    from this arithmetic. The client also logs both every 30 s on one line
    beside its resident set size and its cgroup's `memory.events` `max` count
    (`[MEM] rss_kb=… h3_recv_buffered=… flows_paused=… cg_max_events=…
-   lane_mem_blocked=… lane_mem_errs=…`; `rss_kb` reads 0 off Linux and
-   `cg_max_events` -1 on Android and wherever no cgroup v2 memory controller
-   is visible), so growth toward the limit is attributable from the client's
-   own log. `lane_mem_blocked` is the part of `flows_paused` whose last
-   downlink write was refused because the shared `MEMP_NUM_TCP_SEG` pool was
-   empty, rather than because the flow's own send queue was full, and
-   `lane_mem_errs` counts those refusals. A non-zero `lane_mem_blocked` means
-   flows are waiting on each other's segments, not on their own sinks (§6).
+   lane_mem_blocked=… lane_mem_errs=… lane_syn_pool_empty=…`; `rss_kb` reads
+   0 off Linux and `cg_max_events` -1 on Android and wherever no cgroup v2
+   memory controller is visible), so growth toward the limit is attributable
+   from the client's own log. `lane_mem_blocked` is the part of
+   `flows_paused` whose last downlink write was refused because the shared
+   `MEMP_NUM_TCP_SEG` pool was empty, rather than because the flow's own send
+   queue was full, and `lane_mem_errs` counts those refusals. A non-zero
+   `lane_mem_blocked` means flows are waiting on each other's segments, not on
+   their own sinks (§6).
+   `lane_mem_errs` counts every refused retry, so its rate follows the retry
+   cadence; read it as zero or non-zero, and the gauge for size.
+   `lane_syn_pool_empty` counts new lane connections whose SYN arrived with the
+   pool empty: lwIP cannot build the SYN-ACK and drops the connection without
+   replying, so the host connects about a second later on its SYN retransmit.
 
 `[Hybrid] RecvTotalBufMax` (default `0` = off) bounds the aggregate directly,
 per connection. When the connection's unconsumed body reaches it, every flow
@@ -554,7 +560,28 @@ isolation (the shipped profile, §5c, applies both together):
   workload only ≈ 8 flows on desktop/router (8192 segments) or ≈ 2 on Android (2048) can be
   simultaneously saturated at `TCP_SND_BUF` before the shared segment pool is exhausted,
   after which `tcp_write` backpressure — not a config cap — limits further flows from fully
-  using their send buffer concurrently.
+  using their send buffer concurrently. That backpressure is not shared out. A flow is
+  retried from its own `tcp_sent`, so each flow that is ACKed refills what its ACK freed,
+  until fewer segments are free than one 8960-byte read needs (7 at the ~1342-byte tunnel
+  MSS). The pool then sits at 0–6 free segments. A flow refused while it holds nothing gets
+  no `tcp_sent` at all. It is retried only at its next H3 read notify or at the 1 Hz sweep,
+  and a bulk read cannot fit in what the sweep finds. Four consequences follow:
+  - Bulk flows that miss the first fill are shut out for as long as the holders keep
+    reading. Nothing stamps their activity, so the client's own idle eviction resets
+    them at `TcpIdleTimeoutSec` (300 s by default).
+  - A small write that lands on an empty pool waits up to a second per retry, and each
+    retry can land on an empty pool again.
+  - A new lane connection whose SYN finds the pool empty gets no SYN-ACK: lwIP's
+    `tcp_listen_input` builds it from the same pool and drops the connection when it
+    cannot, so the host connects about a second later, on its SYN retransmit. Counted as
+    `lane_syn_pool_empty`.
+  - Out-of-order uplink segments are dropped while the pool is empty, so uploads see
+    extra retransmissions; FINs are only deferred (lwIP retries them from its timer).
+
+  `tests/test_tcp_lane_mem.c` reproduces the first three against the real pool. The
+  `[MEM]` line's `lane_mem_blocked`, `lane_mem_errs` and `lane_syn_pool_empty` show
+  whether a deployment hits this; on desktop/router builds `-DMQVPN_LWIP_TCP_SEG_POOL`
+  (§1) moves the point at which it does, at the memory cost given there.
 - **`RecvBodyBufMax` is per request, not per connection.** On its own, the
   aggregate H3 receive bound is the per-request value times the number of
   simultaneously backpressured flows (§3), with no ceiling below

@@ -122,6 +122,18 @@ static tcp_lane_flow_status_t tcp_lane_teardown_flow(mqvpn_tcp_flow_t *f, int cl
 static err_t mqvpn_tcp_lane_on_lwip_recv(void *arg, struct tcp_pcb *pcb, struct pbuf *p,
                                          err_t err);
 
+/* 1 if lwIP's MEMP_TCP_SEG pool has a free segment (none is kept). */
+static int
+tcp_lane_pool_has_free_seg(void)
+{
+    void *seg = memp_malloc(MEMP_TCP_SEG);
+    if (!seg) {
+        return 0;
+    }
+    memp_free(MEMP_TCP_SEG, seg);
+    return 1;
+}
+
 /* Power-of-two bucket count from the table's total capacity (load factor
  * ~1), capped at 2^20 buckets. Identical to reorder_tx.c's pick_buckets —
  * kept as a
@@ -379,6 +391,13 @@ mqvpn_tcp_lane_on_syn(mqvpn_tcp_lane_t *lane, const mqvpn_flow_key_t *key, int t
     lane->stats.flows_total++;
     if (to_tcp) {
         lane->n_tcp_flows++;
+        /* lwIP builds the SYN-ACK from MEMP_TCP_SEG; with the pool empty it
+         * drops the new pcb without replying (tcp_listen_input), and the
+         * host retries after its SYN timeout. This runs just before lwIP
+         * sees the SYN, so the pool is in the state lwIP will find. */
+        if (!tcp_lane_pool_has_free_seg()) {
+            lane->stats.syn_pool_empty++;
+        }
     } else {
         lane->n_raw_markers++;
     }

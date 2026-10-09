@@ -515,6 +515,64 @@ test_mem_blocked_counted(void)
     mqvpn_tcp_lane_free(lane);
 }
 
+/* lwIP answers a SYN with a SYN-ACK built from a MEMP_TCP_SEG segment. With
+ * the pool empty, tcp_listen_input abandons the new pcb without a reply
+ * (tcp_in.c), so the host's connection waits for its own SYN retransmit,
+ * about a second. The lane counts lane SYNs that arrive while the pool is
+ * empty. */
+static void
+test_syn_on_empty_pool(void)
+{
+    mqvpn_tcp_lane_t *lane = new_lane();
+    static test_flow_t one;
+    int ok = open_flow(lane, &one, PORT_BASE, 1) == 0;
+    ASSERT_TRUE(ok, "syn: first flow opened");
+    if (!ok) {
+        mqvpn_tcp_lane_free(lane);
+        return;
+    }
+    static void *held[MEMP_NUM_TCP_SEG + 1];
+    int nheld = 0;
+    while ((held[nheld] = memp_malloc(MEMP_TCP_SEG)) != NULL) {
+        nheld++;
+    }
+
+    uint16_t sport = PORT_BASE + 1;
+    uint32_t isn = 5000;
+    uint8_t pkt[64];
+    size_t n = build_v4(pkt, sport, isn, 0, 1);
+    mqvpn_hybrid_config_t ccfg;
+    mqvpn_hybrid_config_default(&ccfg);
+    ccfg.enabled = 1;
+    ccfg.tcp_mode = MQVPN_HYBRID_TCP_STREAM;
+    mqvpn_flow_key_t key;
+    ASSERT_EQ_INT(mqvpn_hybrid_classify(pkt, n, &ccfg, &key), MQVPN_LANE_TCP,
+                  "syn: classified to the lane");
+    ASSERT_EQ_INT(mqvpn_tcp_lane_on_syn(lane, &key, 1, 0), 0, "syn: committed");
+    g_synack_isn[sport - PORT_BASE] = 0;
+    (void)mqvpn_lwip_input(g_ctx, pkt, n);
+    ASSERT_EQ_INT(g_synack_isn[sport - PORT_BASE], 0,
+                  "syn: no SYN-ACK from an empty pool");
+    mqvpn_tcp_lane_stats_t st;
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_EQ_INT(st.syn_pool_empty, 1, "syn: counted");
+
+    /* The host's retransmitted SYN, once a segment is free, is answered. */
+    for (int i = 0; i < nheld; i++) {
+        memp_free(MEMP_TCP_SEG, held[i]);
+    }
+    (void)mqvpn_lwip_input(g_ctx, pkt, n);
+    uint32_t sisn = g_synack_isn[sport - PORT_BASE];
+    ASSERT_TRUE(sisn != 0, "syn: retransmit answered");
+    g_open_flow = NULL;
+    n = build_v4(pkt, sport, isn + 1, sisn + 1, 0);
+    (void)mqvpn_lwip_input(g_ctx, pkt, n);
+    ASSERT_TRUE(g_open_flow != NULL, "syn: connection completes on the retransmit");
+    mqvpn_tcp_lane_get_stats(lane, &st);
+    ASSERT_EQ_INT(st.syn_pool_empty, 1, "syn: a SYN with room is not counted");
+    mqvpn_tcp_lane_free(lane);
+}
+
 int
 main(void)
 {
@@ -525,6 +583,7 @@ main(void)
     }
     test_pool_exhaustion_strands_flows();
     test_mem_blocked_counted();
+    test_syn_on_empty_pool();
     ASSERT_EQ_INT(pool_free_segs(64), 64, "teardown: every test returned its segments");
     mqvpn_lwip_ctx_free(g_ctx);
     fprintf(stderr, "test_tcp_lane_mem: %d passed, %d failed\n", g_pass, g_fail);

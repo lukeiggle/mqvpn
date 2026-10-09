@@ -146,7 +146,12 @@
  * exhaustion — the TCP-lane relay (tcp_lane.c) MUST handle that as
  * backpressure (retry on sent-callback), it is not optional. The pool is
  * therefore a throughput knob, not a correctness one; it tracks the pcb
- * pool so that a fully-occupied flow table still has segments per flow. */
+ * pool so that a fully-occupied flow table still has segments per flow.
+ * It is not only the data path's: lwIP builds SYN-ACKs from it too, and
+ * tcp_listen_input drops a new connection without replying when it is
+ * empty (the host retries after its SYN timeout, ~1 s); FINs are deferred
+ * to the timer (TF_CLOSEPEND) and out-of-order uplink segments dropped.
+ * The lane counts both refusals (mqvpn_tcp_lane_stats_t). */
 /* PBUF_POOL_SIZE: sized to satisfy init.c's compile-time sanity check
  * (TCP_WND <= PBUF_POOL_SIZE * (PBUF_POOL_BUFSIZE - protocol headers)),
  * which lwIP enforces unconditionally whenever MEMP_MEM_MALLOC == 0 and

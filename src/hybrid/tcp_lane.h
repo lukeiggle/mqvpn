@@ -168,7 +168,20 @@ typedef struct {
                                    * because the flow reached its own
                                    * TCP_SND_QUEUELEN */
     uint64_t downlink_mem_errors; /* counter: downlink tcp_write calls
-                                   * refused for that reason */
+                                   * refused for that reason (or, rarely, a
+                                   * failed PBUF_RAM malloc). Counts every
+                                   * refused retry, so its rate follows the
+                                   * retry cadence: compare it across builds
+                                   * only as zero / non-zero, and use the
+                                   * flows_mem_blocked gauge for size */
+    uint64_t syn_pool_empty;      /* counter: lane SYNs that arrived while
+                                   * MEMP_TCP_SEG had no free segment. lwIP
+                                   * builds the SYN-ACK from that pool and,
+                                   * when it cannot, drops the new pcb without
+                                   * a reply (tcp_listen_input), so the inner
+                                   * host waits for its SYN retransmit (~1 s).
+                                   * Counted on the first SYN only (a
+                                   * retransmit does not reach on_syn) */
 } mqvpn_tcp_lane_stats_t;
 
 /* client_ctx is opaque to tcp_lane.c's callers outside mqvpn_client.c; it is

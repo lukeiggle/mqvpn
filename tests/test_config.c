@@ -331,6 +331,82 @@ test_parse_bbr2_flags(void)
     ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "json fastconv absent stays on");
 }
 
+/* [Multipath] Bbr2FcAdvanceGuard / Bbr2InflightHiFloor: default OFF (no new
+ * xquic flag, unchanged behaviour), each switchable on by itself without
+ * touching the other two BBR2 keys, JSON flat at top level. */
+static void
+test_parse_bbr2_guard_flags(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.bbr2_fc_advance_guard, 0, "Bbr2FcAdvanceGuard defaults off");
+    ASSERT_EQ_INT(cfg.bbr2_inflight_hi_floor, 0, "Bbr2InflightHiFloor defaults off");
+
+    char *p = write_tmp("[Multipath]\nCC = bbr2\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "bbr2 guard flags absent load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.bbr2_fc_advance_guard, 0, "Bbr2FcAdvanceGuard absent stays off");
+    ASSERT_EQ_INT(cfg.bbr2_inflight_hi_floor, 0, "Bbr2InflightHiFloor absent stays off");
+
+    const char *spellings_on[] = {"true", "yes", "1", "on"};
+    for (size_t i = 0; i < sizeof(spellings_on) / sizeof(spellings_on[0]); i++) {
+        char ini[128];
+        snprintf(ini, sizeof(ini), "[Multipath]\nBbr2FcAdvanceGuard = %s\n",
+                 spellings_on[i]);
+        p = write_tmp(ini);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "Bbr2FcAdvanceGuard on load ok");
+        unlink(p);
+        ASSERT_EQ_INT(cfg.bbr2_fc_advance_guard, 1, spellings_on[i]);
+        ASSERT_EQ_INT(cfg.bbr2_inflight_hi_floor, 0, "floor untouched by fc guard");
+        ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "fastconv untouched by fc guard");
+        ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, "rttvar untouched by fc guard");
+
+        snprintf(ini, sizeof(ini), "[Multipath]\nBbr2InflightHiFloor = %s\n",
+                 spellings_on[i]);
+        p = write_tmp(ini);
+        mqvpn_config_defaults(&cfg);
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "Bbr2InflightHiFloor on load ok");
+        unlink(p);
+        ASSERT_EQ_INT(cfg.bbr2_inflight_hi_floor, 1, spellings_on[i]);
+        ASSERT_EQ_INT(cfg.bbr2_fc_advance_guard, 0, "fc guard untouched by floor");
+        ASSERT_EQ_INT(cfg.bbr2_fast_convergence, 1, "fastconv untouched by floor");
+        ASSERT_EQ_INT(cfg.bbr2_rttvar_compensation, 1, "rttvar untouched by floor");
+    }
+
+    const char *spellings_off[] = {"false", "no", "0", "off"};
+    for (size_t i = 0; i < sizeof(spellings_off) / sizeof(spellings_off[0]); i++) {
+        char ini[160];
+        snprintf(ini, sizeof(ini),
+                 "[Multipath]\nBbr2FcAdvanceGuard = %s\nBbr2InflightHiFloor = %s\n",
+                 spellings_off[i], spellings_off[i]);
+        p = write_tmp(ini);
+        mqvpn_config_defaults(&cfg);
+        cfg.bbr2_fc_advance_guard = 1;
+        cfg.bbr2_inflight_hi_floor = 1;
+        ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "bbr2 guard flags off load ok");
+        unlink(p);
+        ASSERT_EQ_INT(cfg.bbr2_fc_advance_guard, 0, spellings_off[i]);
+        ASSERT_EQ_INT(cfg.bbr2_inflight_hi_floor, 0, spellings_off[i]);
+    }
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg,
+                                                 "{\"bbr2_fc_advance_guard\": true,"
+                                                 " \"bbr2_inflight_hi_floor\": false}"),
+                  0, "bbr2 guard flags json load ok");
+    ASSERT_EQ_INT(cfg.bbr2_fc_advance_guard, 1, "json bbr2_fc_advance_guard=true");
+    ASSERT_EQ_INT(cfg.bbr2_inflight_hi_floor, 0, "json bbr2_inflight_hi_floor=false");
+
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"bbr2_inflight_hi_floor\": true}"), 0,
+        "bbr2 floor json load ok");
+    ASSERT_EQ_INT(cfg.bbr2_inflight_hi_floor, 1, "json bbr2_inflight_hi_floor=true");
+    ASSERT_EQ_INT(cfg.bbr2_fc_advance_guard, 0, "json fc guard absent stays off");
+}
+
 static void
 test_parse_init_max_path_id_bounds(void)
 {
@@ -2899,6 +2975,7 @@ main(void)
     test_parse_cc_ini();
     test_parse_cc_json();
     test_parse_bbr2_flags();
+    test_parse_bbr2_guard_flags();
     test_parse_init_max_path_id_bounds();
     test_parse_init_max_path_id_json_bounds();
     test_comments_whitespace();

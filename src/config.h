@@ -88,6 +88,13 @@ typedef struct mqvpn_file_config_s {
     int bbr2_fast_convergence;
     int bbr2_rttvar_compensation;
 
+    /* [Multipath] Bbr2FcAdvanceGuard / Bbr2InflightHiFloor — opt-in xquic
+     * BBRv2 flags XQC_BBR2_FLAG_FC_ADVANCE_GUARDED and
+     * XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR. 0 (default) = not set, unchanged;
+     * 1 = set. Ignored unless CC is bbr2. */
+    int bbr2_fc_advance_guard;
+    int bbr2_inflight_hi_floor;
+
     /* [Interface] — client reconnection */
     int reconnect;          /* 1=auto-reconnect (default), 0=exit on disconnect */
     int reconnect_interval; /* base interval in seconds (default 5) */

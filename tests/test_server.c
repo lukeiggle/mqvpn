@@ -271,6 +271,7 @@ bbr2_flags_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
 
 static int
 server_bbr2_flags_logged_for(int fast_convergence, int rttvar_compensation,
+                             int fc_advance_guard, int inflight_hi_floor,
                              const char *want)
 {
     mqvpn_config_t *cfg = make_server_config();
@@ -279,6 +280,10 @@ server_bbr2_flags_logged_for(int fast_convergence, int rttvar_compensation,
         mqvpn_config_set_bbr2_fast_convergence(cfg, fast_convergence);
     if (rttvar_compensation >= 0)
         mqvpn_config_set_bbr2_rttvar_compensation(cfg, rttvar_compensation);
+    if (fc_advance_guard >= 0)
+        mqvpn_config_set_bbr2_fc_advance_guard(cfg, fc_advance_guard);
+    if (inflight_hi_floor >= 0)
+        mqvpn_config_set_bbr2_inflight_hi_floor(cfg, inflight_hi_floor);
     mqvpn_server_callbacks_t cbs = MQVPN_SERVER_CALLBACKS_INIT;
     cbs.tun_output = mock_tun_output;
     cbs.tunnel_config_ready = mock_tunnel_config_ready;
@@ -300,16 +305,39 @@ server_bbr2_flags_logged_for(int fast_convergence, int rttvar_compensation,
 TEST(server_logs_bbr2_flags)
 {
     ASSERT_EQ(server_bbr2_flags_logged_for(
-                  -1, -1, "bbr2 flags: fast_convergence=on rttvar_compensation=on"),
+                  -1, -1, -1, -1,
+                  "bbr2 flags: fast_convergence=on rttvar_compensation=on"
+                  " fc_guard=off inflight_hi_floor=off"),
               1);
     ASSERT_EQ(server_bbr2_flags_logged_for(
-                  0, -1, "bbr2 flags: fast_convergence=off rttvar_compensation=on"),
+                  0, -1, -1, -1,
+                  "bbr2 flags: fast_convergence=off rttvar_compensation=on"
+                  " fc_guard=off inflight_hi_floor=off"),
               1);
     ASSERT_EQ(server_bbr2_flags_logged_for(
-                  -1, 0, "bbr2 flags: fast_convergence=on rttvar_compensation=off"),
+                  -1, 0, -1, -1,
+                  "bbr2 flags: fast_convergence=on rttvar_compensation=off"
+                  " fc_guard=off inflight_hi_floor=off"),
               1);
     ASSERT_EQ(server_bbr2_flags_logged_for(
-                  0, 0, "bbr2 flags: fast_convergence=off rttvar_compensation=off"),
+                  0, 0, -1, -1,
+                  "bbr2 flags: fast_convergence=off rttvar_compensation=off"
+                  " fc_guard=off inflight_hi_floor=off"),
+              1);
+    ASSERT_EQ(server_bbr2_flags_logged_for(
+                  -1, -1, 1, -1,
+                  "bbr2 flags: fast_convergence=on rttvar_compensation=on"
+                  " fc_guard=on inflight_hi_floor=off"),
+              1);
+    ASSERT_EQ(server_bbr2_flags_logged_for(
+                  -1, -1, -1, 1,
+                  "bbr2 flags: fast_convergence=on rttvar_compensation=on"
+                  " fc_guard=off inflight_hi_floor=on"),
+              1);
+    ASSERT_EQ(server_bbr2_flags_logged_for(
+                  -1, -1, 1, 1,
+                  "bbr2 flags: fast_convergence=on rttvar_compensation=on"
+                  " fc_guard=on inflight_hi_floor=on"),
               1);
 }
 

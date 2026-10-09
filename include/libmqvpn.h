@@ -704,6 +704,21 @@ MQVPN_API int mqvpn_config_set_bbr2_fast_convergence(mqvpn_config_t *cfg, int on
  * congestion controller is BBR2. */
 MQVPN_API int mqvpn_config_set_bbr2_rttvar_compensation(mqvpn_config_t *cfg, int on);
 
+/* [Multipath] Bbr2FcAdvanceGuard. Non-zero sets xquic's
+ * XQC_BBR2_FLAG_FC_ADVANCE_GUARDED: the max-bandwidth filter advance made by
+ * fast convergence is taken only at the start of a round on a sample that is
+ * not app-limited, and at most once per bandwidth probing cycle. 0 (default)
+ * leaves the advance as it is. Has an effect only with Bbr2FastConvergence
+ * on; ignored unless the congestion controller is BBR2. */
+MQVPN_API int mqvpn_config_set_bbr2_fc_advance_guard(mqvpn_config_t *cfg, int on);
+
+/* [Multipath] Bbr2InflightHiFloor. Non-zero sets xquic's
+ * XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR: when a bandwidth probe sees too much loss,
+ * BBRv2's in-flight ceiling is lowered by at most 30% per probe rather than
+ * to the in-flight amount at the loss. 0 (default) keeps standard BBRv2
+ * behaviour. Ignored unless the congestion controller is BBR2. */
+MQVPN_API int mqvpn_config_set_bbr2_inflight_hi_floor(mqvpn_config_t *cfg, int on);
+
 /* TUN MTU cap: 0 = auto (MSS-derived), 1280..9000 = upper bound. */
 MQVPN_API int mqvpn_config_set_tun_mtu(mqvpn_config_t *cfg, int mtu);
 /* Underlay path MTU the outer QUIC packets are sized for: 0 = default

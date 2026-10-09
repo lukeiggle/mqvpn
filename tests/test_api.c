@@ -887,6 +887,29 @@ TEST(config_set_bbr2_flags)
     mqvpn_config_free(cfg);
 }
 
+TEST(config_set_bbr2_guard_flags)
+{
+    mqvpn_config_t *cfg = mqvpn_config_new();
+    ASSERT_NOT_NULL(cfg);
+    ASSERT_EQ(cfg->bbr2_fc_advance_guard, 0);  /* default off */
+    ASSERT_EQ(cfg->bbr2_inflight_hi_floor, 0); /* default off */
+    ASSERT_EQ(mqvpn_config_set_bbr2_fc_advance_guard(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_bbr2_inflight_hi_floor(NULL, 1), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_set_bbr2_fc_advance_guard(cfg, 7), MQVPN_OK);
+    ASSERT_EQ(cfg->bbr2_fc_advance_guard, 1);  /* nonzero normalizes to 1 */
+    ASSERT_EQ(cfg->bbr2_inflight_hi_floor, 0); /* independent */
+    ASSERT_EQ(mqvpn_config_set_bbr2_inflight_hi_floor(cfg, 7), MQVPN_OK);
+    ASSERT_EQ(cfg->bbr2_inflight_hi_floor, 1);
+    ASSERT_EQ(cfg->bbr2_fast_convergence, 1); /* the other BBR2 keys untouched */
+    ASSERT_EQ(cfg->bbr2_rttvar_compensation, 1);
+    ASSERT_EQ(mqvpn_config_set_bbr2_fc_advance_guard(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->bbr2_fc_advance_guard, 0);
+    ASSERT_EQ(mqvpn_config_set_bbr2_inflight_hi_floor(cfg, 0), MQVPN_OK);
+    ASSERT_EQ(cfg->bbr2_inflight_hi_floor, 0);
+
+    mqvpn_config_free(cfg);
+}
+
 /* ── Callback ABI tests ── */
 
 TEST(callbacks_abi_init)
@@ -1183,7 +1206,8 @@ bbr2_flags_log(mqvpn_log_level_t level, const char *msg, void *user_ctx)
 }
 
 static int
-bbr2_flags_logged_for(int fast_convergence, int rttvar_compensation, const char *want)
+bbr2_flags_logged_for(int fast_convergence, int rttvar_compensation, int fc_advance_guard,
+                      int inflight_hi_floor, const char *want)
 {
     mqvpn_config_t *cfg = mqvpn_config_new();
     mqvpn_config_set_server(cfg, "1.2.3.4", 443);
@@ -1192,6 +1216,10 @@ bbr2_flags_logged_for(int fast_convergence, int rttvar_compensation, const char 
         mqvpn_config_set_bbr2_fast_convergence(cfg, fast_convergence);
     if (rttvar_compensation >= 0)
         mqvpn_config_set_bbr2_rttvar_compensation(cfg, rttvar_compensation);
+    if (fc_advance_guard >= 0)
+        mqvpn_config_set_bbr2_fc_advance_guard(cfg, fc_advance_guard);
+    if (inflight_hi_floor >= 0)
+        mqvpn_config_set_bbr2_inflight_hi_floor(cfg, inflight_hi_floor);
     mqvpn_client_callbacks_t cbs = MQVPN_CLIENT_CALLBACKS_INIT;
     cbs.tun_output = dummy_tun_output;
     cbs.tunnel_config_ready = dummy_config_ready;
@@ -1213,18 +1241,41 @@ bbr2_flags_logged_for(int fast_convergence, int rttvar_compensation, const char 
 
 TEST(client_logs_bbr2_flags)
 {
-    ASSERT_EQ(bbr2_flags_logged_for(
-                  -1, -1, "bbr2 flags: fast_convergence=on rttvar_compensation=on"),
-              1);
-    ASSERT_EQ(bbr2_flags_logged_for(
-                  0, -1, "bbr2 flags: fast_convergence=off rttvar_compensation=on"),
-              1);
-    ASSERT_EQ(bbr2_flags_logged_for(
-                  -1, 0, "bbr2 flags: fast_convergence=on rttvar_compensation=off"),
-              1);
-    ASSERT_EQ(bbr2_flags_logged_for(
-                  0, 0, "bbr2 flags: fast_convergence=off rttvar_compensation=off"),
-              1);
+    ASSERT_EQ(
+        bbr2_flags_logged_for(-1, -1, -1, -1,
+                              "bbr2 flags: fast_convergence=on rttvar_compensation=on"
+                              " fc_guard=off inflight_hi_floor=off"),
+        1);
+    ASSERT_EQ(
+        bbr2_flags_logged_for(0, -1, -1, -1,
+                              "bbr2 flags: fast_convergence=off rttvar_compensation=on"
+                              " fc_guard=off inflight_hi_floor=off"),
+        1);
+    ASSERT_EQ(
+        bbr2_flags_logged_for(-1, 0, -1, -1,
+                              "bbr2 flags: fast_convergence=on rttvar_compensation=off"
+                              " fc_guard=off inflight_hi_floor=off"),
+        1);
+    ASSERT_EQ(
+        bbr2_flags_logged_for(0, 0, -1, -1,
+                              "bbr2 flags: fast_convergence=off rttvar_compensation=off"
+                              " fc_guard=off inflight_hi_floor=off"),
+        1);
+    ASSERT_EQ(
+        bbr2_flags_logged_for(-1, -1, 1, -1,
+                              "bbr2 flags: fast_convergence=on rttvar_compensation=on"
+                              " fc_guard=on inflight_hi_floor=off"),
+        1);
+    ASSERT_EQ(
+        bbr2_flags_logged_for(-1, -1, -1, 1,
+                              "bbr2 flags: fast_convergence=on rttvar_compensation=on"
+                              " fc_guard=off inflight_hi_floor=on"),
+        1);
+    ASSERT_EQ(
+        bbr2_flags_logged_for(-1, -1, 1, 1,
+                              "bbr2 flags: fast_convergence=on rttvar_compensation=on"
+                              " fc_guard=on inflight_hi_floor=on"),
+        1);
 }
 
 /* ── Query functions ── */
@@ -4341,6 +4392,7 @@ main(void)
     run_config_set_hybrid();
     run_config_set_udp_gso();
     run_config_set_bbr2_flags();
+    run_config_set_bbr2_guard_flags();
 
     /* ABI tests */
     run_callbacks_abi_init();

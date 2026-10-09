@@ -201,7 +201,9 @@ mqvpn_build_conn_settings(const mqvpn_conn_settings_input_t *in, xqc_conn_settin
         out->cc_params.cc_optimization_flags =
             (in->disable_bbr2_rttvar_compensation ? 0
                                                   : XQC_BBR2_FLAG_RTTVAR_COMPENSATION) |
-            (in->disable_bbr2_fast_convergence ? 0 : XQC_BBR2_FLAG_FAST_CONVERGENCE);
+            (in->disable_bbr2_fast_convergence ? 0 : XQC_BBR2_FLAG_FAST_CONVERGENCE) |
+            (in->bbr2_fc_advance_guard ? XQC_BBR2_FLAG_FC_ADVANCE_GUARDED : 0) |
+            (in->bbr2_inflight_hi_floor ? XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR : 0);
         break;
     }
 

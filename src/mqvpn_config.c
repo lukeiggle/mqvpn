@@ -115,6 +115,8 @@ mqvpn_config_new(void)
     cfg->init_max_path_id = 0;         /* 0 = use xquic default (8) */
     cfg->bbr2_fast_convergence = 1;    /* xquic BBRv2 fast convergence, as always */
     cfg->bbr2_rttvar_compensation = 1; /* xquic BBRv2 rttvar compensation, as always */
+    cfg->bbr2_fc_advance_guard = 0;    /* 0 = flag not set, unchanged */
+    cfg->bbr2_inflight_hi_floor = 0;   /* 0 = flag not set, unchanged */
     cfg->udp_gso = 1;                  /* TX GSO/batch enabled by default */
 
     /* §16: reorder shim defaults (mode OFF until explicitly enabled). */
@@ -498,6 +500,22 @@ mqvpn_config_set_bbr2_rttvar_compensation(mqvpn_config_t *cfg, int on)
 {
     if (!cfg) return MQVPN_ERR_INVALID_ARG;
     cfg->bbr2_rttvar_compensation = on ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_bbr2_fc_advance_guard(mqvpn_config_t *cfg, int on)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->bbr2_fc_advance_guard = on ? 1 : 0;
+    return MQVPN_OK;
+}
+
+int
+mqvpn_config_set_bbr2_inflight_hi_floor(mqvpn_config_t *cfg, int on)
+{
+    if (!cfg) return MQVPN_ERR_INVALID_ARG;
+    cfg->bbr2_inflight_hi_floor = on ? 1 : 0;
     return MQVPN_OK;
 }
 

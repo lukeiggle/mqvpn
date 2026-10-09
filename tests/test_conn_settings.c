@@ -549,6 +549,61 @@ test_bbr2_flag_opt_outs(void)
     return 0;
 }
 
+/* The guard and floor flags are opt-ins: a zeroed input sets neither (the
+ * long-standing flag set), each enable adds exactly its own bit on both
+ * endpoints, they do not depend on the fast-convergence opt-out, and they
+ * never leak onto another CC. */
+static int
+test_bbr2_guard_flag_opt_ins(void)
+{
+    const uint32_t base =
+        XQC_BBR2_FLAG_RTTVAR_COMPENSATION | XQC_BBR2_FLAG_FAST_CONVERGENCE;
+
+    for (int side = 0; side < 2; side++) {
+        xqc_conn_settings_t cs;
+        mqvpn_conn_settings_input_t in = {
+            .is_server = (side == 1),
+            .enable_multipath = true,
+            .scheduler = MQVPN_SCHED_WLB,
+            .cc = MQVPN_CC_BBR2,
+        };
+
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags, base);
+
+        in.bbr2_fc_advance_guard = true;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags,
+                  base | XQC_BBR2_FLAG_FC_ADVANCE_GUARDED);
+
+        in.bbr2_fc_advance_guard = false;
+        in.bbr2_inflight_hi_floor = true;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags,
+                  base | XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR);
+
+        in.bbr2_fc_advance_guard = true;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags,
+                  base | XQC_BBR2_FLAG_FC_ADVANCE_GUARDED |
+                      XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR);
+
+        /* Passed through as set; xquic ignores the guard without fast
+         * convergence. */
+        in.disable_bbr2_fast_convergence = true;
+        in.disable_bbr2_rttvar_compensation = true;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags,
+                  XQC_BBR2_FLAG_FC_ADVANCE_GUARDED | XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR);
+
+        /* Inert on any other congestion controller. */
+        in.cc = MQVPN_CC_CUBIC;
+        mqvpn_build_conn_settings(&in, &cs);
+        ASSERT_EQ(cs.cc_params.cc_optimization_flags, 0);
+    }
+    return 0;
+}
+
 int
 main(void)
 {
@@ -558,6 +613,7 @@ main(void)
     failed += test_propagation_scheduler();
     failed += test_propagation_cc();
     failed += test_bbr2_flag_opt_outs();
+    failed += test_bbr2_guard_flag_opt_ins();
     failed += test_propagation_init_max_path_id();
     failed += test_path_mtu_sizes_packets();
     failed += test_pmtud_sizes();

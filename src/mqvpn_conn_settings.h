@@ -70,6 +70,14 @@ typedef struct {
      * No effect on any other congestion controller. */
     bool disable_bbr2_fast_convergence;
     bool disable_bbr2_rttvar_compensation;
+
+    /* bbr2_fc_advance_guard / bbr2_inflight_hi_floor: set xquic's
+     * XQC_BBR2_FLAG_FC_ADVANCE_GUARDED / XQC_BBR2_FLAG_INFLIGHT_HI_FLOOR,
+     * which are otherwise not set. Opt-ins, so a zeroed input keeps the flag
+     * set mqvpn has always used. Passed through independently of the two
+     * opt-outs above. No effect on any other congestion controller. */
+    bool bbr2_fc_advance_guard;
+    bool bbr2_inflight_hi_floor;
 } mqvpn_conn_settings_input_t;
 
 /* Populates *out with mqvpn-canonical xquic conn settings. Always begins

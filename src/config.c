@@ -625,6 +625,11 @@ static const cfg_key_desc_t cfg_keys[] = {
      CFGK_OFF(bbr2_fast_convergence), 0, 0, NULL, 0, 0, NULL},
     {SEC_MULTIPATH, "Bbr2RttvarCompensation", "bbr2_rttvar_compensation", CFGK_BOOL_ONOFF,
      CFGK_OFF(bbr2_rttvar_compensation), 0, 0, NULL, 0, 0, NULL},
+    /* Opt-in xquic BBRv2 guards, default off (zeroed by mqvpn_config_defaults). */
+    {SEC_MULTIPATH, "Bbr2FcAdvanceGuard", "bbr2_fc_advance_guard", CFGK_BOOL_ONOFF,
+     CFGK_OFF(bbr2_fc_advance_guard), 0, 0, NULL, 0, 0, NULL},
+    {SEC_MULTIPATH, "Bbr2InflightHiFloor", "bbr2_inflight_hi_floor", CFGK_BOOL_ONOFF,
+     CFGK_OFF(bbr2_inflight_hi_floor), 0, 0, NULL, 0, 0, NULL},
     /* [Reorder] — JSON side lives inside the bounded "reorder" object */
     {SEC_REORDER, "Enabled", "enabled", CFGK_REORDER_MODE, CFGK_OFF(reorder.mode), 0, 0,
      NULL, 0, 0, NULL},

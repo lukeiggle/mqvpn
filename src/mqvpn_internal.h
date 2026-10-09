@@ -174,6 +174,10 @@ struct mqvpn_config_s {
      * optimisation flags. 1 (default) = set, unchanged; 0 = cleared. */
     int bbr2_fast_convergence;
     int bbr2_rttvar_compensation;
+    /* [Multipath] Bbr2FcAdvanceGuard / Bbr2InflightHiFloor: opt-in xquic
+     * BBRv2 flags. 0 (default) = not set, unchanged; 1 = set. */
+    int bbr2_fc_advance_guard;
+    int bbr2_inflight_hi_floor;
 
     int tun_mtu;  /* 0 = auto (client: negotiated; server: 1382), >0 = client cap / server
                      TUN MTU */

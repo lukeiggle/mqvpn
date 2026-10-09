@@ -35,6 +35,8 @@ typedef struct mqvpn_client_cfg_s {
     uint64_t init_max_path_id;         /* draft-21 §4.6 TP cap, 0=use xquic default 8 */
     int bbr2_fast_convergence;         /* [Multipath] Bbr2FastConvergence; default 1 */
     int bbr2_rttvar_compensation;      /* [Multipath] Bbr2RttvarCompensation; default 1 */
+    int bbr2_fc_advance_guard;         /* [Multipath] Bbr2FcAdvanceGuard; default 0 */
+    int bbr2_inflight_hi_floor;        /* [Multipath] Bbr2InflightHiFloor; default 0 */
     int tun_mtu;                       /* 0=auto (MSS-derived), >0=cap (floor 1280) */
     int path_mtu;                      /* 0=default packet size, >0=underlay MTU */
     int pmtud;                         /* 1=discover the path MTU, path_mtu is the cap */

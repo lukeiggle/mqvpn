@@ -768,6 +768,15 @@ if(BUILD_TESTING)
             ${CMAKE_SOURCE_DIR}/include
         )
         add_test(NAME test_tcp_lane COMMAND test_tcp_lane)
+        # Same two lane TUs against the real lwIP pools (no write hooks).
+        add_executable(test_tcp_lane_mem tests/test_tcp_lane_mem.c src/hybrid/classifier.c
+                       src/hybrid/lwip_glue.c src/log.c)
+        target_link_libraries(test_tcp_lane_mem lwip_core)
+        target_include_directories(test_tcp_lane_mem PRIVATE
+            ${CMAKE_SOURCE_DIR}/src
+            ${CMAKE_SOURCE_DIR}/include
+        )
+        add_test(NAME test_tcp_lane_mem COMMAND test_tcp_lane_mem)
     endif()
 
     # test_config / test_conn_settings — copied from the Linux definitions
@@ -973,6 +982,10 @@ if(BUILD_TESTING)
                        src/hybrid/lwip_glue.c src/log.c)
         target_link_libraries(test_tcp_lane lwip_core)
         list(APPEND MQVPN_UNIT_TESTS test_tcp_lane)
+        add_executable(test_tcp_lane_mem tests/test_tcp_lane_mem.c src/hybrid/classifier.c
+                       src/hybrid/lwip_glue.c src/log.c)
+        target_link_libraries(test_tcp_lane_mem lwip_core)
+        list(APPEND MQVPN_UNIT_TESTS test_tcp_lane_mem)
     endif()
 
     foreach(t ${MQVPN_UNIT_TESTS})

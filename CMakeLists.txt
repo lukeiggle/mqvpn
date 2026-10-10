@@ -165,6 +165,30 @@ foreach(_scale_var MQVPN_LWIP_RCV_SCALE MQVPN_LWIP_IOS_RCV_SCALE)
     endif()
 endforeach()
 
+# Desktop/router lwIP TCP segment pool (MEMP_NUM_TCP_SEG), default 8192 in
+# mqvpn_lwip_profile.h. Shared by every TCP-lane flow; see the cost note
+# there (~1.49 KB per segment holding a full-MSS write). Forwarded the same
+# directory-global way as the scale overrides above, and validated here so a
+# bad value fails at configure time rather than as a truncated pool: lwIP
+# keeps the count in a u16_t, and 937 is TCP_SND_QUEUELEN, below which lwIP's
+# init.c refuses to build.
+if(DEFINED MQVPN_LWIP_TCP_SEG_POOL)
+    # No leading zero: C would read "010000" as octal while CMake compares it
+    # as decimal, and "032768" is not a valid constant at all.
+    if(NOT "${MQVPN_LWIP_TCP_SEG_POOL}" MATCHES "^[1-9][0-9]*$"
+       OR MQVPN_LWIP_TCP_SEG_POOL LESS 937 OR MQVPN_LWIP_TCP_SEG_POOL GREATER 65535)
+        message(FATAL_ERROR
+                "MQVPN_LWIP_TCP_SEG_POOL must be a decimal integer in [937, 65535] "
+                "without leading zeros, got "
+                "'${MQVPN_LWIP_TCP_SEG_POOL}'")
+    endif()
+    if(MQVPN_LWIP_IOS_PROFILE OR ANDROID)
+        message(FATAL_ERROR
+                "MQVPN_LWIP_TCP_SEG_POOL sets the desktop/router profile's pool only")
+    endif()
+    add_compile_definitions(MQVPN_LWIP_TCP_SEG_POOL=${MQVPN_LWIP_TCP_SEG_POOL})
+endif()
+
 # ---------- Hybrid mode server-side TCP egress (Linux-only) ----------
 # Server-side connect-tcp egress (src/hybrid/tcp_egress.c): POSIX sockets +
 # the platform egress-fd registry (platform_linux.c only). Depends on the

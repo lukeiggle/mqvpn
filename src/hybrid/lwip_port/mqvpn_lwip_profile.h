@@ -37,6 +37,11 @@
       "MQVPN_LWIP_MOBILE_{PROFILE,RCV_SCALE} were renamed to MQVPN_LWIP_IOS_{PROFILE,RCV_SCALE}"
 #endif
 
+#if defined(MQVPN_LWIP_TCP_SEG_POOL) && \
+    (defined(MQVPN_LWIP_IOS_PROFILE) || defined(__ANDROID__))
+#  error "MQVPN_LWIP_TCP_SEG_POOL overrides the desktop/router segment pool only"
+#endif
+
 #ifdef MQVPN_LWIP_IOS_PROFILE
 #  ifndef MQVPN_LWIP_IOS_RCV_SCALE
 #    define MQVPN_LWIP_IOS_RCV_SCALE 2
@@ -68,7 +73,23 @@
  * one segment per flow, and tcp_write() would return ERR_MEM (relay
  * backpressure — correct, but a throughput cliff) at full occupancy. */
 #  define MQVPN_LWIP_TCP_PCB_POOL 8192
-#  define MQVPN_LWIP_TCP_SEG_POOL 8192
+/* The segment pool alone is overridable here (CMake option
+ * MQVPN_LWIP_TCP_SEG_POOL): it is the one fixed pool on the downlink data
+ * path, so a router whose LAN has many slow receivers can trade memory for
+ * more of them backlogged at once before writes start failing. Each
+ * segment costs 32 B of .bss here, and while it holds a full-MSS write
+ * about 1.49 KB in all (pool element, PBUF_RAM header and headroom, payload,
+ * malloc overhead): 8192 pins at most ~12 MB, 32768 ~49 MB, 65535 ~98 MB.
+ * lwIP stores a pool's size in a u16_t (memp_priv.h), so 65536 and above
+ * would silently truncate; they are refused below. lwIP's own init.c check
+ * (MEMP_NUM_TCP_SEG >= TCP_SND_QUEUELEN) bounds it from below. */
+#  ifndef MQVPN_LWIP_TCP_SEG_POOL
+#    define MQVPN_LWIP_TCP_SEG_POOL 8192
+#  endif
+#endif
+
+#if MQVPN_LWIP_TCP_SEG_POOL > 65535
+#  error "MQVPN_LWIP_TCP_SEG_POOL above 65535 overflows lwIP's u16 pool count"
 #endif
 
 /* Window scale for the NON-iOS side of the window axis (desktop/router AND

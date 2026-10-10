@@ -99,4 +99,21 @@ MQVPN_LWIP_TCP_PCB_POOL|128
 MQVPN_LWIP_TCP_SEG_POOL|512
 PINS
 
+# MQVPN_LWIP_TCP_SEG_POOL (CMake option of the same name) overrides the
+# desktop/router segment pool only, and only within lwIP's u16 pool count.
+check "desktop/router, segment pool override" "-DMQVPN_LWIP_TCP_SEG_POOL=32768" <<'PINS'
+MQVPN_LWIP_TCP_PCB_POOL|8192
+MQVPN_LWIP_TCP_SEG_POOL|32768
+MEMP_NUM_TCP_SEG|MQVPN_LWIP_TCP_SEG_POOL
+PINS
+refuse() {  # $1 = label, $2 = flags that must fail to preprocess
+  if dump "$2" >/dev/null 2>&1; then
+    echo "FAIL: ${1}: '$2' preprocessed without an #error"
+    exit 1
+  fi
+}
+refuse "segment pool above lwIP's u16 count" "-DMQVPN_LWIP_TCP_SEG_POOL=65536"
+refuse "segment pool override on Android" "-D__ANDROID__ -DMQVPN_LWIP_TCP_SEG_POOL=4096"
+refuse "segment pool override on iOS" "-DMQVPN_LWIP_IOS_PROFILE -DMQVPN_LWIP_TCP_SEG_POOL=4096"
+
 echo "PASS: profile invariance"

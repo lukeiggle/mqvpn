@@ -123,7 +123,7 @@ test_clock(void *ctx)
 #define SERVER_IP 0x5db8d822u /* 93.184.216.34, the flow's destination */
 #define TUN_MTU   1382        /* a common tunnel TUN MTU: lwIP MSS 1342 */
 
-#define MAX_PORTS 64
+#define MAX_PORTS 512
 #define PORT_BASE 20000
 static uint32_t g_synack_isn[MAX_PORTS];
 
@@ -246,7 +246,7 @@ new_lane(void)
     mqvpn_hybrid_config_default(&cfg);
     cfg.enabled = 1;
     cfg.tcp_mode = MQVPN_HYBRID_TCP_STREAM;
-    cfg.tcp_max_flows = 64;
+    cfg.tcp_max_flows = MAX_PORTS;
     mqvpn_tcp_lane_t *lane =
         mqvpn_tcp_lane_new(&cfg, 0x6d656dULL, NULL, test_clock, NULL);
     mqvpn_lwip_ctx_set_accept_cb(g_ctx, mqvpn_tcp_lane_lwip_accept, lane);
@@ -348,7 +348,10 @@ ack_churn_step(test_flow_t *flows, int n)
     }
 }
 
-#define N_BULK    12
+/* Enough slow sinks to fill the pool with a few left over: 12 at the default
+ * 8192 segments, more under a raised MQVPN_LWIP_TCP_SEG_POOL. */
+#define FILLERS   (MEMP_NUM_TCP_SEG / (TCP_SND_QUEUELEN - 2))
+#define N_BULK    (FILLERS + 4)
 #define BULK_READ 8960 /* one cli_tcp_lane_h3_recv buffer (TCP_MSS) */
 #define READ_SEGS ((BULK_READ + (TUN_MTU - 40) - 1) / (TUN_MTU - 40))
 
@@ -479,7 +482,7 @@ test_mem_blocked_counted(void)
     }
     mqvpn_tcp_lane_stats_t st;
     mqvpn_tcp_lane_get_stats(lane, &st);
-    ASSERT_TRUE(own_limit >= 8, "count: flows at their own queue limit");
+    ASSERT_TRUE(own_limit >= FILLERS, "count: flows at their own queue limit");
     ASSERT_TRUE(pool_blocked >= 3, "count: flows refused by the pool");
     ASSERT_EQ_INT(st.flows_paused, own_limit + pool_blocked,
                   "count: flows_paused covers both");
@@ -493,10 +496,13 @@ test_mem_blocked_counted(void)
     for (int i = 0; i < N_BULK; i++) {
         bulk[i].req.bulk = 0;
     }
-    for (int k = 0; k < 100000 && pool_free_segs(64) < 64; k++) {
+    for (int k = 0, busy = 1; k < 100000 && busy; k++) {
+        busy = 0;
         for (int i = 0; i < N_BULK; i++) {
-            if (bulk[i].f->pcb->snd_nxt != bulk[i].f->pcb->lastack)
+            if (bulk[i].f->pcb->snd_queuelen) {
                 host_ack(&bulk[i], 65535);
+                busy = 1;
+            }
         }
     }
     g_now_us += 1000000;

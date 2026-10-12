@@ -342,6 +342,8 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | `TcpIdleTimeoutSec` | TCP レーンフローのアイドル破棄タイムアウト。`0` で無効化。サーバーでは、`RecvBodyBufMax` または `RecvTotalBufMax` が設定されている場合、クライアントのフロー制御クレジットによってクライアントへの中継が止められているフローはアイドルではなくクライアント待ちとみなされ、破棄されません（フローごとに 1 回警告をログに出力します） | client + server | `300` |
 | `TcpConnectTimeoutSec` | サーバの egress `connect()` タイムアウト。超過時クライアントは HTTP `504` を受け取ります | server | `10` |
 | `TcpMaxGlobalFlows` | 全セッション合計の egress TCP フロー数のサーバ全体上限 | server | `4096` |
+| `RecvBodyBufMax` | レーンがまだ消費していない HTTP/3 レスポンス／リクエスト本文の、リクエストごとの上限（バイト、`0`–`67108864`。`0` = 無効で上限なし）。レーンフローのローカルソケットの排出が相手の送信より遅いとき、受信側はこの値でそのリクエストストリームの読み取りとフロー制御クレジットの発行を止めるため、受信側のヒープが増える代わりに相手側が待たされます。最悪時のメモリ使用量はこの値 × 同時に背圧のかかっているフロー数です。両端で設定してください。クライアントはダウンロードを、サーバーはアップロードを制限します | client + server | `0` |
+| `RecvTotalBufMax` | 同じ未消費本文を接続内の全リクエストで合計した、接続ごとの上限（バイト、`0` = 無効）。合計がこの値に達すると、64 KiB を超えて保持しているフローはすべて `RecvBodyBufMax` に達したときと同様に一時停止し、合計が半分を下回るまで止まったままになります。64 KiB 以下のフローは読み取りを続けます。`RecvBodyBufMax` だけでは抑えられない「その値 × 背圧のかかったフロー数」を制限します。目安は（メモリ上限 − 平常時の使用量）の半分です。両端で設定してください。サーバーではクライアントセッションごとに適用されます | client + server | `0` |
 | `EgressAllow` | プライベートレンジ向けデフォルト拒否 egress ACL を通す CIDR（繰り返し可、最大 32） | server | — |
 | `EgressDeny` | 追加で拒否する CIDR。`EgressAllow` の後に評価されます（繰り返し可、最大 32） | server | — |
 
@@ -367,7 +369,7 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 残り半分は、フローテーブルが数えなくなった pcb (TIME_WAIT / LAST_ACK / CLOSING はフローより
 長生きする) が居座るための余白として確保してあります。
 
-JSON では `"hybrid"` オブジェクトに snake_case キーで指定します（`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `egress_allow`, `egress_deny`）。
+JSON では `"hybrid"` オブジェクトに snake_case キーで指定します（`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `recv_body_buf_max`, `recv_total_buf_max`, `egress_allow`, `egress_deny`）。
 
 > egress ACL は `EgressAllow`/`EgressDeny` を何も設定しなくても RFC1918・
 > ループバック・リンクローカル宛をデフォルト拒否します。侵害されたクライアントが
@@ -382,8 +384,9 @@ JSON では `"hybrid"` オブジェクトに snake_case キーで指定します
 | `UdpGro` | 高スループット時に受信 UDP パケットをカーネル GRO でまとめて受け取り、CPU 使用率を下げます。非対応カーネル（5.0 未満）では 1 パケットずつの受信に自動的にフォールバックします。Linux のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前の受信経路に戻ります | `true` |
 | `TunOffload` | カーネルがトンネルインターフェースへの通信をまとめて 1 回で渡し、mqvpn 側で分割します。高スループット時の CPU 使用率を下げます。非対応カーネルでは 1 パケットずつの読み取りに自動的にフォールバックします。Linux のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前のトンネルインターフェースに戻ります | `true` |
 | `TunGro` | トンネルインターフェースへ書き込む連続した TCP パケットと、同じサイズの連続した UDP データグラムを 1 回の書き込みにまとめ、高スループット時の CPU 使用率を下げます。UDP データグラムをまとめるのはカーネル 6.2 以降のみで、それより古いカーネルでは従来どおり 1 つずつ書き込みます。`TunOffload` が `false` のときは効果がありません。Linux のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前のように 1 パケットずつ書き込みます | `true` |
+| `XquicQuietStreamReset` | ハイブリッド TCP レーンが、正常にリセットされたリクエストストリームごとに 1 回ずつ出力する 2 つの xquic ログメッセージを抑止します。クライアントの `xqc_stream_recv error\|-626` 行と、`close_msg:remote reset` を含むサーバーのリクエストごとの `xqc_h3_request_destroy` レポートです。その他の xquic メッセージは、他の理由による destroy レポートも含めてすべて出力されます。混雑したレーンではこの 2 つがログ量の大半を占めることがあります。CONNECT-IP ストリーム自体が相手側からリセットされた場合も非表示になりますが、それに続くトンネルの切断はログに残ります。クライアントとサーバーの両方に適用されます | `false` |
 
-JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`）。
+JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`, `udp_gso`, `udp_gro`, `tun_offload`, `tun_gro`, `xquic_quiet_stream_reset`）。
 
 ## MTU ガイドライン
 

@@ -377,7 +377,7 @@ The other pool half is reserved as headroom for pcbs the flow table has stopped
 counting — TIME_WAIT, LAST_ACK and CLOSING outlive the flow itself.
 
 
-In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `egress_allow`, `egress_deny`).
+In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `recv_body_buf_max`, `recv_total_buf_max`, `egress_allow`, `egress_deny`).
 
 > The egress ACL default-denies RFC1918, loopback, and link-local targets even
 > with no `EgressAllow`/`EgressDeny` configured — a safety default against a

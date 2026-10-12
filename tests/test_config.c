@@ -2620,6 +2620,10 @@ test_ini_json_scalar_parity(void)
                       "ReinjectionHardDeadlineMs = 300\n"
                       "ReinjectionDeadlineLowerBoundMs = 10\n"
                       "Redundant = true\n"
+                      "Bbr2FastConvergence = off\n"
+                      "Bbr2RttvarCompensation = off\n"
+                      "Bbr2FcAdvanceGuard = on\n"
+                      "Bbr2InflightHiFloor = on\n"
                       "[Reorder]\n"
                       "Enabled = on\n"
                       "MaxWaitMs = 55\n"
@@ -2682,6 +2686,10 @@ test_ini_json_scalar_parity(void)
                        "\"reinjection_hard_deadline_ms\":300,"
                        "\"reinjection_deadline_lower_bound_ms\":10,"
                        "\"redundant\":true,"
+                       "\"bbr2_fast_convergence\":false,"
+                       "\"bbr2_rttvar_compensation\":false,"
+                       "\"bbr2_fc_advance_guard\":true,"
+                       "\"bbr2_inflight_hi_floor\":true,"
                        "\"reorder\":{"
                        "\"enabled\":\"on\","
                        "\"max_wait_ms\":55,"
@@ -2782,6 +2790,14 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.udp_gro, b.udp_gro, "parity advanced udp_gro");
     ASSERT_EQ_INT(a.tun_offload, b.tun_offload, "parity advanced tun_offload");
     ASSERT_EQ_INT(a.tun_gro, b.tun_gro, "parity advanced tun_gro");
+    ASSERT_EQ_INT(a.bbr2_fast_convergence, b.bbr2_fast_convergence,
+                  "parity bbr2_fast_convergence");
+    ASSERT_EQ_INT(a.bbr2_rttvar_compensation, b.bbr2_rttvar_compensation,
+                  "parity bbr2_rttvar_compensation");
+    ASSERT_EQ_INT(a.bbr2_fc_advance_guard, b.bbr2_fc_advance_guard,
+                  "parity bbr2_fc_advance_guard");
+    ASSERT_EQ_INT(a.bbr2_inflight_hi_floor, b.bbr2_inflight_hi_floor,
+                  "parity bbr2_inflight_hi_floor");
 
     /* Non-default guards: prove these asserts pass because the value was
      * actually parsed, not because it silently failed to parse on BOTH
@@ -2816,6 +2832,14 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.udp_gro, 0, "parity advanced udp_gro is non-default");
     ASSERT_EQ_INT(a.tun_offload, 0, "parity advanced tun_offload is non-default");
     ASSERT_EQ_INT(a.tun_gro, 0, "parity advanced tun_gro is non-default");
+    ASSERT_EQ_INT(a.bbr2_fast_convergence, 0,
+                  "parity bbr2_fast_convergence is non-default");
+    ASSERT_EQ_INT(a.bbr2_rttvar_compensation, 0,
+                  "parity bbr2_rttvar_compensation is non-default");
+    ASSERT_EQ_INT(a.bbr2_fc_advance_guard, 1,
+                  "parity bbr2_fc_advance_guard is non-default");
+    ASSERT_EQ_INT(a.bbr2_inflight_hi_floor, 1,
+                  "parity bbr2_inflight_hi_floor is non-default");
 
     /* Both structs were memset by mqvpn_config_defaults → padding is zero
      * → whole-struct compare is deterministic. */

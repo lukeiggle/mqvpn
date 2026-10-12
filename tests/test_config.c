@@ -2705,12 +2705,15 @@ test_ini_json_scalar_parity(void)
                       "TcpIdleTimeoutSec = 60\n"
                       "TcpConnectTimeoutSec = 20\n"
                       "TcpMaxGlobalFlows = 8192\n"
+                      "RecvBodyBufMax = 3000000\n"
+                      "RecvTotalBufMax = 70000000\n"
                       "[Advanced]\n"
                       "RecvRateLimit = 77\n"
                       "UdpGso = false\n"
                       "UdpGro = false\n"
                       "TunOffload = false\n"
-                      "TunGro = false\n";
+                      "TunGro = false\n"
+                      "XquicQuietStreamReset = true\n";
     /* NOTE: [Auth] Key is INI-only dual-write (auth_key + server_auth_key);
      * mirror it in JSON by setting BOTH json keys to the same value. */
     const char *ini_auth_extra = "[Auth]\nKey = parity-secret\n";
@@ -2767,14 +2770,17 @@ test_ini_json_scalar_parity(void)
                        "\"tcp_max_flows\":128,"
                        "\"tcp_idle_timeout_sec\":60,"
                        "\"tcp_connect_timeout_sec\":20,"
-                       "\"tcp_max_global_flows\":8192"
+                       "\"tcp_max_global_flows\":8192,"
+                       "\"recv_body_buf_max\":3000000,"
+                       "\"recv_total_buf_max\":70000000"
                        "},"
                        "\"advanced\":{"
                        "\"recv_rate_limit\":77,"
                        "\"udp_gso\":false,"
                        "\"udp_gro\":false,"
                        "\"tun_offload\":false,"
-                       "\"tun_gro\":false"
+                       "\"tun_gro\":false,"
+                       "\"xquic_quiet_stream_reset\":true"
                        "}"
                        "}";
 
@@ -2846,6 +2852,12 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.udp_gro, b.udp_gro, "parity advanced udp_gro");
     ASSERT_EQ_INT(a.tun_offload, b.tun_offload, "parity advanced tun_offload");
     ASSERT_EQ_INT(a.tun_gro, b.tun_gro, "parity advanced tun_gro");
+    ASSERT_EQ_INT((int)a.hybrid.recv_body_buf_max, (int)b.hybrid.recv_body_buf_max,
+                  "parity hybrid recv_body_buf_max");
+    ASSERT_EQ_INT((int)a.hybrid.recv_total_buf_max, (int)b.hybrid.recv_total_buf_max,
+                  "parity hybrid recv_total_buf_max");
+    ASSERT_EQ_INT(a.xquic_quiet_stream_reset, b.xquic_quiet_stream_reset,
+                  "parity advanced xquic_quiet_stream_reset");
 
     /* Non-default guards: prove these asserts pass because the value was
      * actually parsed, not because it silently failed to parse on BOTH
@@ -2880,6 +2892,12 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.udp_gro, 0, "parity advanced udp_gro is non-default");
     ASSERT_EQ_INT(a.tun_offload, 0, "parity advanced tun_offload is non-default");
     ASSERT_EQ_INT(a.tun_gro, 0, "parity advanced tun_gro is non-default");
+    ASSERT_EQ_INT((int)a.hybrid.recv_body_buf_max, 3000000,
+                  "parity hybrid recv_body_buf_max is non-default");
+    ASSERT_EQ_INT((int)a.hybrid.recv_total_buf_max, 70000000,
+                  "parity hybrid recv_total_buf_max is non-default");
+    ASSERT_EQ_INT(a.xquic_quiet_stream_reset, 1,
+                  "parity advanced xquic_quiet_stream_reset is non-default");
 
     /* Both structs were memset by mqvpn_config_defaults → padding is zero
      * → whole-struct compare is deterministic. */

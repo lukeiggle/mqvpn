@@ -211,6 +211,10 @@ JSON ではクライアント・サーバーとも `auth_key` を使います（
 | `ReinjectionSrttFactorPct` | `deadline` モード: factor × min_srtt を超えた未 ACK パケットを複製、パーセント指定（`100`–`1000`） | `110` |
 | `ReinjectionHardDeadlineMs` | `deadline` モード: 複製デッドラインの上限クランプ（`1`–`60000`） | `500` |
 | `ReinjectionDeadlineLowerBoundMs` | `deadline` モード: 下限クランプ。上限を超える値は上限に切り詰め（`1`–`60000`） | `20` |
+| `Bbr2FastConvergence` | `CC = bbr2` のとき、xquic の BBRv2 fast convergence 拡張を有効にします。この拡張は、ラウンドの平滑化 RTT が前のラウンドより 4 分の 1 以上大きくなるたびに最大帯域フィルタを進め、帯域プローブを 2〜3 秒ごとではなく 5〜8 ラウンドトリップごとに行います。`off` で標準の BBRv2 の動作になります（`on`/`off`。他の `CC` では無視） | `on` |
+| `Bbr2RttvarCompensation` | `CC = bbr2` のとき、最近の RTT のばらつきに応じて輻輳ウィンドウに余裕を加える xquic の BBRv2 拡張を有効にします。`off` で標準の BBRv2 の輻輳ウィンドウになります（`on`/`off`。他の `CC` では無視） | `on` |
+| `Bbr2FcAdvanceGuard` | `CC = bbr2` かつ `Bbr2FastConvergence = on` のとき、fast convergence による最大帯域フィルタの更新を、ラウンドの開始時に、送信するデータが不足していなかった（application-limited でない）帯域サンプルを受けたときだけ、帯域プローブ 1 サイクルにつき最大 1 回に限定します。短い RTT の急増や通常の RTT のばらつきで推定値が繰り返し引き下げられることを防ぎます。`off` では fast convergence はそのままです（`on`/`off`。`Bbr2FastConvergence = off` や他の `CC` では効果なし） | `off` |
+| `Bbr2InflightHiFloor` | `CC = bbr2` のとき、帯域プローブで損失が多すぎた場合に、BBRv2 の送信中データ量の上限を損失時の送信中データ量まで下げる代わりに、1 回のプローブにつき最大 30% だけ下げます。上限よりずっと低い位置で起きた損失によって輻輳ウィンドウが小さな値に固定されることを防ぎます。代償として、パスの容量が本当に下がったときの反応が遅くなります。`off` で標準の BBRv2 の動作になります（`on`/`off`。他の `CC` では無視） | `off` |
 | `Redundant` | クライアント専用。`on` にすると、送信する UDP パケットのコピーを複数の回線で同時に送り、1 本の回線が切れてもライブ配信などが途切れにくくなります。そのトラフィックのデータ使用量は、2 本なら最大 2 倍、3 本なら最大 3 倍です。どの回線もそのトラフィックを単独で運べる速度があることを推奨します。回線が足りないことが多い場合はオフにしてください。[冗長モード](./multipath#冗長モード)を参照してください。 | `off` |
 | `RedundantPorts` | クライアント専用。`Redundant = on` のとき複製する宛先ポートをカンマ区切りで指定します（最大 16 個）。空の場合はすべての UDP を複製します。`Redundant = on` のとき、不正な値を指定するとクライアントは起動時に停止します。 | 空 |
 

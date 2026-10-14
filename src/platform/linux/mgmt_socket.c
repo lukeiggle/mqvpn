@@ -70,6 +70,13 @@ struct mgmt_socket {
     struct event *ev_accept;
     const mgmt_ctx_t *ctx;
     char sock_path[sizeof(((struct sockaddr_un *)0)->sun_path)];
+    /* Identity of the socket inode WE bound, snapshotted right after bind.
+     * destroy() unlinks the path only while it still resolves to this inode,
+     * so a later instance that (wrongly or legitimately) re-bound the path
+     * is never torn down by our exit. bound_st_valid guards the comparison
+     * (0 = stat failed at create; fall back to unconditional unlink). */
+    struct stat bound_st;
+    int bound_st_valid;
     int n_conns;
     mgmt_conn_impl_t *conns; /* intrusive doubly-linked list, no fixed cap */
 
@@ -405,6 +412,31 @@ mgmt_socket_create(struct event_base *eb, const char *path, mode_t mode,
         return NULL;
     }
 
+    addr.sun_family = AF_UNIX;
+    memcpy(addr.sun_path, path, strlen(path) + 1);
+
+    /* Probe for a LIVE listener before claiming the path: a non-blocking
+     * connect() that succeeds — or fails EAGAIN (backlog full, so somebody
+     * is bound and wedged) — means another instance owns this socket.
+     * Stealing it via the unlink below would strand that instance
+     * invisibly, and our exit-time unlink would then remove ITS socket
+     * file. ENOENT / ECONNREFUSED mean missing or stale: safe to claim.
+     * A probe socket() failure skips the check (old behavior). */
+    {
+        int pfd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0);
+        if (pfd >= 0) {
+            int prc = connect(pfd, (struct sockaddr *)&addr, sizeof(addr));
+            int perrno = errno;
+            close(pfd);
+            if (prc == 0 || (prc < 0 && perrno == EAGAIN)) {
+                snprintf(errbuf, errlen, "another instance is already listening on %s",
+                         path);
+                LOG_ERR("mgmt ipc: %s", errbuf);
+                return NULL;
+            }
+        }
+    }
+
     /* Stale socket file from a previous run: remove before bind(). A
      * missing file (ENOENT) is the expected common case, not an error. */
     if (unlink(path) != 0 && errno != ENOENT) {
@@ -420,15 +452,16 @@ mgmt_socket_create(struct event_base *eb, const char *path, mode_t mode,
         return NULL;
     }
 
-    addr.sun_family = AF_UNIX;
-    memcpy(addr.sun_path, path, strlen(path) + 1);
-
     if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
         snprintf(errbuf, errlen, "bind(%s): %s", path, strerror(errno));
         LOG_ERR("mgmt ipc: %s", errbuf);
         close(fd);
         return NULL;
     }
+
+    /* Snapshot the bound inode for destroy()'s guarded unlink. */
+    struct stat bound_st;
+    int bound_st_valid = (stat(path, &bound_st) == 0);
 
     /* Permissions are applied between bind() and listen(): no peer can ever
      * connect() to a socket with the wrong mode/group. */
@@ -478,6 +511,8 @@ mgmt_socket_create(struct event_base *eb, const char *path, mode_t mode,
     ms->eb = eb;
     ms->listen_fd = fd;
     ms->ctx = ctx;
+    ms->bound_st = bound_st;
+    ms->bound_st_valid = bound_st_valid;
     memcpy(ms->sock_path, path, strlen(path) + 1);
 
     ms->ev_accept = event_new(eb, fd, EV_READ | EV_PERSIST, mgmt_on_accept, ms);
@@ -509,7 +544,18 @@ mgmt_socket_destroy(mgmt_socket_t *ms)
         event_free(ms->ev_accept);
     }
     if (ms->listen_fd >= 0) close(ms->listen_fd);
-    unlink(ms->sock_path);
+    /* Guarded unlink: only remove the path while it still resolves to the
+     * inode we bound — if another instance re-bound it meanwhile, the file
+     * is theirs now. stat ENOENT (already gone) also skips the unlink. */
+    if (ms->bound_st_valid) {
+        struct stat st;
+        if (stat(ms->sock_path, &st) == 0 && st.st_dev == ms->bound_st.st_dev &&
+            st.st_ino == ms->bound_st.st_ino) {
+            unlink(ms->sock_path);
+        }
+    } else {
+        unlink(ms->sock_path);
+    }
     free(ms->scratch);
     free(ms);
 }

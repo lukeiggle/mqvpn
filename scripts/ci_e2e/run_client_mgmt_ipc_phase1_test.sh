@@ -608,6 +608,34 @@ test_t13() {
 }
 run_test "T13 permission boundary (root or passwordless sudo)" test_t13
 
+# ── T14 ─────────────────────────────────────────────────────────────────
+# A second instance must refuse to steal a LIVE socket (live-listener probe),
+# and the loser's exit must not unlink the winner's socket file (guarded
+# unlink): the first host keeps serving afterwards.
+test_t14() {
+    local sock="${TMPD}/t14.sock"
+    local pid_a
+    pid_a="$(start_host "${sock}")"
+    wait_for_socket "${sock}" 5 || { echo "  host A never bound"; return 1; }
+
+    # Host B on the same path must exit non-zero and say why.
+    local out_b rc_b
+    out_b="$("${HOST_BIN}" "${sock}" 2>&1)"
+    rc_b=$?
+    [[ ${rc_b} -ne 0 ]] || { echo "  host B unexpectedly started on a live socket"; kill "${pid_a}" >/dev/null 2>&1; return 1; }
+    [[ "${out_b}" == *"another instance"* ]] || {
+        echo "  expected 'another instance' from host B, got: ${out_b}"
+        kill "${pid_a}" >/dev/null 2>&1; return 1; }
+
+    # Host A must still be reachable (B's failure did not unlink A's socket).
+    local out_a rc_a
+    out_a="$("${MQVPNCTL}" --endpoint "unix://${sock}" version 2>&1)"
+    rc_a=$?
+    kill "${pid_a}" >/dev/null 2>&1
+    [[ ${rc_a} -eq 0 ]] || { echo "  host A unreachable after B's rejection: ${out_a}"; return 1; }
+}
+run_test "T14 second instance refuses to steal a live socket" test_t14
+
 # ── Summary ─────────────────────────────────────────────────────────────
 echo ""
 echo "=== Results: PASS=${PASS} FAIL=${FAIL} ==="

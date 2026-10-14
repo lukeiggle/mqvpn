@@ -83,6 +83,46 @@ The hybrid TCP **stream lane** terminates TCP at the client and relays it in-ord
 
 ![Hybrid TCP-lane — WLB scheduler](/img/bench-hybrid-wlb.png)
 
+**Asymmetric paths** — same bench on A = 300 Mbit / 10 ms + B = 80 Mbit / 30 ms (380 Mbps aggregate). Hybrid ON saturates the aggregate on asymmetric paths too — **350–357 Mbps** (≈93 % of 380 Mbps) at <code>-P ≥ 2</code>. Raw multipath never fully recovers here: with WLB the cross-path reorder penalty (20 ms vs 60 ms RTT legs) caps it at 330 Mbps even at 16 streams, and MinRTT keeps everything on the fast path (~275 Mbps) since it only spills when cwnd-blocked. Unlike the symmetric case, the lane's gain therefore persists at every stream count: MinRTT **+29–35 %**, WLB **+26 %** (<code>-P 1</code>) → **+7 %** (<code>-P 16</code>).
+
+![Hybrid TCP-lane, asymmetric paths — MinRTT scheduler](/img/bench-hybrid-asym-minrtt.png)
+
+![Hybrid TCP-lane, asymmetric paths — WLB scheduler](/img/bench-hybrid-asym-wlb.png)
+
+## SRT live streaming
+
+<p class="section-desc">SRT contribution feeds over emulated impaired links (netns). mqvpn defaults (WLB scheduler, BBR v2) + SRT receiver <code>lossmaxttl=32</code>.</p>
+
+Bonding two weak or lossy links turns an unwatchable SRT feed into a stable one. Below, an 8 Mbps FHD stream where each uplink alone is only 6 Mbit — a single connection (left) vs the same two connections bonded by mqvpn (right):
+
+<video controls muted playsinline style="width: 100%; border-radius: 8px;" src="https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5"></video>
+
+| Scenario | Direct (single link) | mqvpn (2-path) |
+|---|---|---|
+| Starved uplinks (8 Mbps FHD over 2 × 6 Mbit) | VMAF 8.6, 1.2 s frozen | VMAF **87.7**, 0 s frozen |
+| Exceeds any single link (120 Mbps over 2 × 100 Mbit) | 31.5 % stream loss | **0.06 %** stream loss |
+| Dual cellular (42 Mbps over 40 + 30 Mbit lossy links) | 20–40 % stream loss | **0.9 %** stream loss |
+
+<p class="section-desc">VMAF: perceptual video quality score, 0–100 (higher is better).</p>
+
+Full report and comparison videos: [`bench_results/srt/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/srt)
+
+## RTMP live streaming
+
+<p class="section-desc">RTMP publishing over emulated impaired links (netns), through mqvpn's hybrid TCP lane. OBS-like publisher behaviour: 10 s stall detection, 2 s reconnect retry.</p>
+
+RTMP runs over a single TCP connection and cannot bond links by itself. Through mqvpn it bonds transparently — the encoder and the streaming service stay unmodified. Below, one of two bonded links is cut for 30 seconds mid-stream — direct (left) stops for ~33 s; mqvpn (right) never stops:
+
+<video controls muted playsinline style="width: 100%; border-radius: 8px;" src="https://github.com/user-attachments/assets/04d3b4f9-be82-4a85-857d-474e503bfa94"></video>
+
+| Scenario | Direct (single link) | mqvpn (2-path) |
+|---|---|---|
+| Two weak uplinks (8 Mbps over 2 × 6 Mbit) | capped at 5.7 Mbps, drifts behind live | **7.8 Mbps, stays live** |
+| Bursty mobile-style loss | repeated disconnects, barely delivers | **stable, no disconnects** |
+| One link cut for 30 s | stream drops until the link returns | **keeps streaming** |
+
+Full report with all numbers: [RTMP bonding benchmark](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — data and videos: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
+
 <style scoped>
 .page-desc {
   font-size: 0.9em;

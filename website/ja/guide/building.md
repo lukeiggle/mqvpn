@@ -11,7 +11,7 @@
 - libevent 2.x
 
 ::: info
-初回ビルド時に BoringSSL のソースを GitHub からクローンするため、インターネット接続が必要です。
+サブモジュール取得（`git submodule update --init --recursive`、BoringSSL を含む）にインターネット接続が必要です。
 :::
 
 ### クイックビルド
@@ -115,10 +115,9 @@ vcpkg install libevent:x64-windows-static
 #### 2. BoringSSL のビルド
 
 ```batch
-cd third_party\xquic\third_party
-git clone https://github.com/google/boringssl.git
-cd boringssl
-git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+REM BoringSSL is a submodule of the xquic fork (pinned); it is fetched by
+REM `git submodule update --init --recursive`.
+cd third_party\xquic\third_party\boringssl
 
 mkdir build && cd build
 cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 ..
@@ -177,11 +176,8 @@ export ANDROID_HOME=/path/to/android-sdk
 export ANDROID_NDK_HOME=/path/to/android-ndk
 export ANDROID_NDK="$ANDROID_NDK_HOME"
 
-# サブモジュールを取得
+# サブモジュールを取得（BoringSSL を含む）
 git submodule update --init --recursive
-
-# BoringSSL ソースの準備
-git clone https://github.com/google/boringssl.git third_party/xquic/third_party/boringssl
 
 # ネイティブライブラリをクロスコンパイル（arm64-v8a）
 scripts/build_android.sh --abi arm64-v8a
@@ -203,5 +199,38 @@ android/
 ├── sdk-core/      # MqvpnVpnService、MqvpnManager、TunnelBridge
 └── app/           # デモアプリ（Jetpack Compose）
 ```
+
+## iOS
+
+::: info
+iOS 対応はクライアントのみで開発中です。アプリと PacketTunnel 拡張は `ios/poc/` 配下にあります。CI はフルチェーンのクロスビルドとアプリの未署名ビルドを行いますが、実機での実行には各自の署名 ID が必要です。
+:::
+
+### 前提条件
+
+- 新しめの Xcode（16.3 以降。CI は `macos-15` イメージでインストール済みの最新 Xcode を選択）を備えた macOS
+- CMake、Ninja、Python 3
+- Xcode プロジェクト生成用の [xcodegen](https://github.com/yonaskolb/XcodeGen)（`brew install xcodegen`）
+- サブモジュール込みのチェックアウト（`git submodule update --init --recursive`）。BoringSSL も含まれます
+
+### ネイティブライブラリのクロスビルド
+
+```bash
+./ios/build-ios.sh            # BoringSSL → xquic（静的）→ libmqvpn（静的）
+./ios/build-ios.sh mqvpn      # mqvpn コアのみ再ビルド
+```
+
+このスクリプトは全ライブラリを `iphoneos`/arm64（デプロイメントターゲット 15.0）向けにビルドし、ハイブリッド TCP レーンを縮小版の[iOS lwIP プロファイル](./hybrid-mode#ios-ビルド)（`MQVPN_LWIP_IOS_PROFILE=ON`）付きで有効化、プロファイルが全翻訳単位に伝播したことを検証（`tests/check_profile_propagation.py`）した上で、アーカイブを `ios/build/` にステージングします（`libmqvpn.a`、`liblwip_core.a`、`libxquic-static.a`、`libssl.a`、`libcrypto.a`）。
+
+### アプリと PacketTunnel 拡張のビルド
+
+```bash
+bash ios/poc/Tests/run-host-tests.sh                         # Swift ホストテスト（SDK 不要）
+
+cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # DEVELOPMENT_TEAM を設定
+(cd ios/poc && xcodegen generate)                            # Xcode プロジェクトを生成
+```
+
+CI は同じプロジェクトを未署名（`CODE_SIGNING_ALLOWED=NO`）でビルドし、実機・シミュレータでの実行は手動ステップです。
 
 ビルドのテストは[はじめに](./getting-started)を参照してください。

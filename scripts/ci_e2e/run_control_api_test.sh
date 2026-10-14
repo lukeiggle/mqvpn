@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 # run_control_api_test.sh — end-to-end test for the v0.5.0 server control API.
 #
 # Verifies all 8 control commands (add_user / remove_user / list_users / get_stats /
@@ -32,6 +34,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/../../benchmarks/bench_env_setup.sh"
+source "${SCRIPT_DIR}/e2e_lib.sh"
 
 # Phase opt-out for CI: space-separated list of phase letters (e.g. "B F").
 SKIP_PHASES=" ${MQVPN_E2E_SKIP_PHASES:-} "
@@ -459,6 +462,13 @@ test_phase_b_active_session() {
     fi
     echo "  client connected: OK"
 
+    # Offload counters BEFORE the traffic. The tunnel handshake and the ping
+    # above have already moved all four off zero, so a ">0 afterwards" check
+    # would pass even if post-accept accounting were entirely broken. The
+    # delta below is what actually tests "counting under traffic".
+    local resp_pre
+    resp_pre=$(ctrl_local '{"cmd":"get_stats"}')
+
     # Drive 5s of iperf3 traffic (client NS → server VIP)
     ip netns exec "$NS_SERVER" iperf3 -s -1 -D --logfile "${LOG_DIR}/phase_b_iperf3_server.log" || true
     sleep 0.2
@@ -483,6 +493,43 @@ PY
         echo "  bytes_tx + bytes_rx == 0 after iperf3 burst (got $bytes_total): $resp"; return 1
     fi
     echo "  get_stats bytes_total=$bytes_total: OK"
+
+    # Outer-UDP offload counters, under real traffic. Phase H.2 only proves
+    # the four keys exist; this proves they are wired to something that
+    # actually counts during the traffic above — the "present but always 0"
+    # and "counted once at startup, then frozen" classes that the
+    # hand-written get_stats snprintf keeps inviting. Deliberately NOT
+    # asserting a ratio > 1: batching depends on the kernel and the offered
+    # load, and this phase must pass with UdpGso/UdpGro off, where datagrams
+    # and syscalls are exactly equal.
+    local offload_check
+    offload_check=$(python3 - "$resp_pre" "$resp" <<'PY'
+import json, sys
+KEYS = ("udp_tx_sends", "udp_tx_datagrams", "udp_rx_receives", "udp_rx_datagrams")
+pre, post = json.loads(sys.argv[1]), json.loads(sys.argv[2])
+errs = []
+for k in KEYS:
+    if k not in post:
+        errs.append(f"{k} absent")
+        continue
+    # Strictly greater, not just non-zero: the handshake and the tunnel ping
+    # already made all four positive before the traffic started.
+    d = post[k] - pre.get(k, 0)
+    if d <= 0:
+        errs.append(f"{k} did not advance ({pre.get(k)} -> {post[k]})")
+ts, td = post.get("udp_tx_sends", 0), post.get("udp_tx_datagrams", 0)
+rr, rd = post.get("udp_rx_receives", 0), post.get("udp_rx_datagrams", 0)
+if td < ts: errs.append(f"tx datagrams<sends ({td}<{ts})")
+if rd < rr: errs.append(f"rx datagrams<receives ({rd}<{rr})")
+print("; ".join(errs) if errs
+      else f"OK tx=+{td - pre.get('udp_tx_datagrams', 0)}/+{ts - pre.get('udp_tx_sends', 0)}"
+           f" rx=+{rd - pre.get('udp_rx_datagrams', 0)}/+{rr - pre.get('udp_rx_receives', 0)}")
+PY
+)
+    case "$offload_check" in
+        OK\ *) echo "  get_stats offload counters $offload_check" ;;
+        *) echo "  get_stats offload counters: $offload_check ($resp)"; return 1 ;;
+    esac
 
     # get_status: clients[0].user == "alice", paths populated, pkt_sent > 0
     resp=$(ctrl_local '{"cmd":"get_status"}')
@@ -1242,7 +1289,8 @@ test_phase_h_new_commands() {
     echo "--- Phase H.2: get_stats extended fields ---"
     RESP=$(ctrl_local '{"cmd":"get_stats"}')
     assert_json_field "$RESP" ok true        || { echo "FAIL H.2: ok ($RESP)"; return 1; }
-    for k in n_clients bytes_tx bytes_rx dgram_sent dgram_recv dgram_lost dgram_acked uptime_sec; do
+    for k in n_clients bytes_tx bytes_rx dgram_sent dgram_recv dgram_lost dgram_acked \
+             udp_tx_sends udp_tx_datagrams udp_rx_receives udp_rx_datagrams uptime_sec; do
         local v
         v=$(echo "$RESP" | jget "$k")
         [[ -n "$v" ]] || { echo "FAIL H.2: missing $k in $RESP"; return 1; }
@@ -1340,6 +1388,197 @@ PY
     return 0
 }
 
+# --- Phase I: per-user (client-requested) scheduler ---
+
+# _phase_i_stop_client: stop the client started by start_client_with_auth_key.
+_phase_i_stop_client() {
+    if [[ -n "$_BENCH_CLIENT_PID" ]]; then
+        kill "$_BENCH_CLIENT_PID" 2>/dev/null || true
+        wait "$_BENCH_CLIENT_PID" 2>/dev/null || true
+        _BENCH_CLIENT_PID=""
+    fi
+    return 0
+}
+
+# _phase_i_order <log> <start_line> <negotiation-ERE>
+# Ordering rule: within the log window after <start_line>, the first
+# negotiation line and (independently) the first secondary-path activation
+# (`path[N] activate:`; only secondary paths log it) must both exist, negotiation first. Prints both
+# line numbers on failure. awk reads to EOF (no early-exit reader).
+_phase_i_order() {
+    local log="$1" start="$2" neg_re="$3" neg act
+    neg=$(tail -n "+$((start + 1))" "$log" | NEG_RE="$neg_re" awk \
+        'f == 0 && $0 ~ ENVIRON["NEG_RE"] { f = NR } END { print f + 0 }')
+    act=$(tail -n "+$((start + 1))" "$log" | awk \
+        'f == 0 && $0 ~ /path\[[0-9]+\] activate:/ { f = NR } END { print f + 0 }')
+    if (( neg == 0 || act == 0 || neg >= act )); then
+        echo "  ordering violated in $log (window starts after line $start): " \
+             "negotiation '$neg_re' at window line $neg (0=absent)," \
+             "first secondary activate at window line $act (0=absent)"
+        return 1
+    fi
+    echo "  ordering OK: negotiation at window line $neg < first secondary activate at $act"
+    return 0
+}
+
+# _phase_i_status_ok <user> <scheduler> <n_paths>  → 0 when get_status shows it
+_phase_i_status_ok() {
+    local resp
+    resp=$(ctrl_local '{"cmd":"get_status"}') || return 1
+    python3 - "$resp" "$1" "$2" "$3" <<'PY'
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+for c in d.get("clients", []):
+    if c.get("user") == sys.argv[2]:
+        ok = (sys.argv[3] == "any" or c.get("scheduler") == sys.argv[3]) and (
+            sys.argv[4] == "any" or c.get("n_paths") == int(sys.argv[4]))
+        sys.exit(0 if ok else 1)
+sys.exit(1)
+PY
+}
+
+# _phase_i_expect <user> <scheduler> <n_paths|any>: wait up to 10s, print JSON on failure
+_phase_i_expect() {
+    if wait_for 10 _phase_i_status_ok "$1" "$2" "$3"; then
+        echo "  get_status: $1 scheduler=$2 n_paths=$3 OK"
+        return 0
+    fi
+    echo "  get_status: $1 expected scheduler=$2 n_paths=$3; got: $(ctrl_local '{"cmd":"get_status"}')"
+    return 1
+}
+
+# _phase_i_client_up <key> <log> <flags>: start client, wait for tunnel ping
+_phase_i_client_up() {
+    start_client_with_auth_key "$1" "$2" "$3" || return 1
+    if ! wait_for 15 ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_SERVER_IP"; then
+        echo "  tunnel never came up (flags: $3); tail of $2:"
+        tail -20 "$2" >&2
+        return 1
+    fi
+    return 0
+}
+
+# _phase_i_log_has <log> <ERE> <what>: assert match, print tail of log if absent
+_phase_i_log_has() {
+    if grep -qE "$2" "$1"; then
+        echo "  $3: OK"
+        return 0
+    fi
+    echo "  $3: pattern '$2' not in $1; matching-ish lines: $(grep -E 'scheduler' "$1" | tail -5)"
+    return 1
+}
+
+test_phase_i_client_scheduler() {
+    local server_log="${LOG_DIR}/phase_i_server.log"
+    local alice_log="${LOG_DIR}/phase_i_alice.log"
+    local bob_log="${LOG_DIR}/phase_i_bob.log"
+    local n0 n1 cnt out
+
+    # Step 1: fresh netns, server wlb + client choice allowed.
+    # INFO lines need --log-level info; BENCH_LOG_LEVEL defaults to info.
+    bench_cleanup
+    bench_setup_netns
+    start_server_with_flags "$server_log" \
+        --auth-key "$_BENCH_PSK" --control-port "$CTRL_PORT" \
+        --scheduler wlb --allow-client-scheduler \
+        --user alice:secret_a --user bob:secret_b \
+        || { echo "  server failed to start"; return 1; }
+    local -a srv_base=(--mode server --listen "0.0.0.0:${VPN_LISTEN_PORT}"
+        --subnet 10.0.0.0/24 --cert "$_BENCH_WORK_DIR/server.crt"
+        --key "$_BENCH_WORK_DIR/server.key" --log-level "$BENCH_LOG_LEVEL"
+        --auth-key "$_BENCH_PSK" --control-port "$CTRL_PORT"
+        --user alice:secret_a --user bob:secret_b)
+
+    # Step 2: alice opts in, asks for minrtt.
+    echo "  I.2 alice requests minrtt"
+    _phase_i_client_up secret_a "$alice_log" "--scheduler minrtt --request-server-scheduler" || return 1
+    _phase_i_expect alice minrtt 2 || return 1
+    _phase_i_log_has "$server_log" 'client requested scheduler minrtt: applied \(user=alice\)' "I.2 server log" || return 1
+    _phase_i_order "$alice_log" 0 'server scheduler: minrtt \(requested minrtt\)' || return 1
+
+    # Step 3: server restart while alice stays up; she must renegotiate.
+    echo "  I.3 reconnect while opted in"
+    n0=$(wc -l < "$alice_log")
+    relaunch_server_in_ns "${LOG_DIR}/phase_i_server_3.log" "${srv_base[@]}" \
+        --scheduler wlb --allow-client-scheduler || return 1
+    # The killed server sent no CONNECTION_CLOSE: push one packet so the new
+    # server's stateless reset reaches alice at once (as run_reconnect_test.sh polls ping).
+    ip netns exec "$NS_CLIENT" ping -c 1 -W 1 "$TUNNEL_SERVER_IP" >/dev/null 2>&1 || true
+    if ! wait_for_log_after "$alice_log" 'server scheduler: minrtt \(requested minrtt\)' "$n0" 30; then
+        echo "  I.3 no renegotiation line after alice log line $n0; tail:"
+        tail -20 "$alice_log" >&2
+        return 1
+    fi
+    if ! wait_for_log_after "$alice_log" 'path\[[0-9]+\] activate:' "$n0" 5; then
+        echo "  I.3 no 'activate:' line after alice log line $n0; tail:"
+        tail -20 "$alice_log" >&2
+        return 1
+    fi
+    _phase_i_order "$alice_log" "$n0" 'server scheduler: minrtt \(requested minrtt\)' || return 1
+    _phase_i_expect alice minrtt 2 || return 1
+    _phase_i_stop_client
+
+    # Step 4: bob does not opt in; his --scheduler is local only.
+    echo "  I.4 bob without request"
+    n1=$(wc -l < "${LOG_DIR}/phase_i_server_3.log")
+    _phase_i_client_up secret_b "$bob_log" "--scheduler minrtt" || return 1
+    _phase_i_expect bob wlb any || return 1
+    cnt=$(tail -n "+$((n1 + 1))" "${LOG_DIR}/phase_i_server_3.log" | command grep -cE 'client requested scheduler' || true)
+    if [[ "$cnt" != "0" ]]; then
+        echo "  I.4 server logged $cnt 'client requested scheduler' lines after bob started:"
+        tail -n "+$((n1 + 1))" "${LOG_DIR}/phase_i_server_3.log" | command grep -E 'client requested scheduler'
+        return 1
+    fi
+    echo "  I.4 no 'client requested scheduler' line for bob: OK"
+    _phase_i_stop_client
+
+    # Step 5: server without --allow-client-scheduler refuses.
+    echo "  I.5 server disallows client choice"
+    relaunch_server_in_ns "${LOG_DIR}/phase_i_server_5.log" "${srv_base[@]}" --scheduler wlb || return 1
+    _phase_i_client_up secret_a "$alice_log" "--scheduler minrtt --request-server-scheduler" || return 1
+    _phase_i_expect alice wlb any || return 1
+    _phase_i_log_has "${LOG_DIR}/phase_i_server_5.log" \
+        'client requested scheduler minrtt: not applied \(disabled\), using wlb \(user=alice\)' "I.5 server log" || return 1
+    _phase_i_log_has "$alice_log" 'server scheduler: wlb \(requested minrtt\)' "I.5 client log" || return 1
+    _phase_i_stop_client
+
+    # Step 6: server minrtt, alice asks for wlb; traffic must flow.
+    echo "  I.6 minrtt -> wlb direction"
+    relaunch_server_in_ns "${LOG_DIR}/phase_i_server_6.log" "${srv_base[@]}" \
+        --scheduler minrtt --allow-client-scheduler || return 1
+    _phase_i_client_up secret_a "$alice_log" "--scheduler wlb --request-server-scheduler" || return 1
+    _phase_i_expect alice wlb 2 || return 1
+    out=$(ip netns exec "$NS_CLIENT" ping -c 20 -i 0.2 -W 2 "$TUNNEL_SERVER_IP" 2>&1 || true)
+    if ! grep -qE ' 0% packet loss' <<< "$out"; then
+        echo "  I.6 ping loss: $(tail -3 <<< "$out")"
+        return 1
+    fi
+    echo "  I.6 ping 20 packets, 0% loss: OK"
+    _phase_i_stop_client
+
+    # Step 7: old server (no scheduler echo), only if a binary is named.
+    if [[ -z "${MQVPN_E2E_OLD_SERVER:-}" ]]; then
+        echo "  SKIP phase_i old-server step"
+        return 0
+    fi
+    echo "  I.7 old server: $MQVPN_E2E_OLD_SERVER"
+    MQVPN="$MQVPN_E2E_OLD_SERVER" relaunch_server_in_ns "${LOG_DIR}/phase_i_server_7.log" \
+        "${srv_base[@]}" --scheduler wlb || return 1
+    _phase_i_client_up secret_a "$alice_log" "--scheduler minrtt --request-server-scheduler" || return 1
+    if ! wait_for_log_after "$alice_log" 'path\[[0-9]+\] activate:' 0 5; then
+        echo "  I.7 no 'activate:' line in alice log; tail:"
+        tail -20 "$alice_log" >&2
+        return 1
+    fi
+    _phase_i_order "$alice_log" 0 'server did not report its scheduler \(requested minrtt\)' || return 1
+    _phase_i_expect alice any 2 || return 1
+    _phase_i_stop_client
+    return 0
+}
+
 # --- Main runner ---
 
 # (empty for this chunk; phases will be wired in their own chunks)
@@ -1373,6 +1612,7 @@ maybe_run "phase_d security & robustness"          D test_phase_d_security
 maybe_run "phase_e restart resilience"             E test_phase_e_restart
 maybe_run "phase_f scheduler matrix smoke"         F test_phase_f_scheduler_smoke
 maybe_run "phase_h new commands (build_info + extended get_stats + fec_stats + all_fec_stats)" H test_phase_h_new_commands
+maybe_run "phase_i per-user scheduler"            I test_phase_i_client_scheduler
 maybe_run "phase_g INI-driven control-API config"  G test_phase_g_ini_config   # must be LAST
 
 echo ""

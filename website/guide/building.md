@@ -9,7 +9,7 @@
 - GNU Make
 - GCC or Clang (C11)
 - libevent 2.x
-- Network access for the first build (BoringSSL is cloned from GitHub)
+- Network access to fetch submodules (`git submodule update --init --recursive`, which includes BoringSSL)
 
 ### Quick Build
 
@@ -111,10 +111,9 @@ vcpkg install libevent:x64-windows-static
 #### 2. Build BoringSSL
 
 ```batch
-cd third_party\xquic\third_party
-git clone https://github.com/google/boringssl.git
-cd boringssl
-git checkout 9c95ec797c65fde9e8ddffc3888f0b8c1460fe4c
+REM BoringSSL is a submodule of the xquic fork (pinned); it is fetched by
+REM `git submodule update --init --recursive`.
+cd third_party\xquic\third_party\boringssl
 
 mkdir build && cd build
 cmake -G "Visual Studio 17 2022" -A x64 -DBUILD_SHARED_LIBS=0 ..
@@ -176,9 +175,6 @@ export ANDROID_NDK="$ANDROID_NDK_HOME"
 # Ensure submodules are present
 git submodule update --init --recursive
 
-# Prepare BoringSSL source
-git clone https://github.com/google/boringssl.git third_party/xquic/third_party/boringssl
-
 # Cross-compile native libraries (arm64-v8a)
 scripts/build_android.sh --abi arm64-v8a
 
@@ -199,5 +195,38 @@ android/
 ├── sdk-core/      # MqvpnVpnService, MqvpnManager, TunnelBridge
 └── app/           # Demo app (Jetpack Compose)
 ```
+
+## iOS
+
+::: info
+iOS support is client-only and in development: the app and PacketTunnel extension live under `ios/poc/`. CI cross-builds the full chain and compiles the app unsigned; running on a device requires your own signing identity.
+:::
+
+### Prerequisites
+
+- macOS with a recent Xcode (16.3 or newer; CI uses the `macos-15` image and selects the newest installed Xcode)
+- CMake, Ninja, Python 3
+- [xcodegen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`) for generating the Xcode project
+- Git checkout with submodules (`git submodule update --init --recursive`), which includes BoringSSL
+
+### Cross-build the native libraries
+
+```bash
+./ios/build-ios.sh            # BoringSSL → xquic (static) → libmqvpn (static)
+./ios/build-ios.sh mqvpn      # rebuild only the mqvpn core
+```
+
+The script builds everything for `iphoneos`/arm64 with deployment target 15.0, enables the hybrid TCP lane with the reduced [iOS lwIP profile](./hybrid-mode#ios-builds) (`MQVPN_LWIP_IOS_PROFILE=ON`), verifies the profile propagated to every translation unit (`tests/check_profile_propagation.py`), and stages the archives to `ios/build/` (`libmqvpn.a`, `liblwip_core.a`, `libxquic-static.a`, `libssl.a`, `libcrypto.a`).
+
+### Build the app and PacketTunnel extension
+
+```bash
+bash ios/poc/Tests/run-host-tests.sh                         # Swift host tests (no SDK required)
+
+cp ios/poc/Config.example.xcconfig ios/poc/Config.xcconfig   # set your DEVELOPMENT_TEAM
+(cd ios/poc && xcodegen generate)                            # generate the Xcode project
+```
+
+CI builds the same project unsigned (`CODE_SIGNING_ALLOWED=NO`); device and simulator execution remain a manual step.
 
 See [Getting Started](./getting-started) to test your build.

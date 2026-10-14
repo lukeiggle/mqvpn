@@ -95,6 +95,7 @@ enum {
     SEC_REORDER,
     SEC_REORDER_RULE,
     SEC_HYBRID,
+    SEC_ADVANCED,
 };
 
 static int
@@ -110,6 +111,7 @@ parse_section(const char *name)
     if (strcasecmp(name, "Reorder") == 0) return SEC_REORDER;
     if (strcasecmp(name, "ReorderRule") == 0) return SEC_REORDER_RULE;
     if (strcasecmp(name, "Hybrid") == 0) return SEC_HYBRID;
+    if (strcasecmp(name, "Advanced") == 0) return SEC_ADVANCED;
     return -1;
 }
 
@@ -127,6 +129,7 @@ section_name(int section)
     case SEC_REORDER: return "Reorder";
     case SEC_REORDER_RULE: return "ReorderRule";
     case SEC_HYBRID: return "Hybrid";
+    case SEC_ADVANCED: return "Advanced";
     default: return "?";
     }
 }
@@ -462,6 +465,18 @@ cfgk_int_mtu(int v)
     return v == 0 || (v >= 1280 && v <= 9000);
 }
 
+static int
+cfgk_int_reinj_factor_pct(int v)
+{
+    return v >= 100 && v <= 1000;
+}
+
+static int
+cfgk_int_reinj_deadline_ms(int v)
+{
+    return v >= 1 && v <= 60000;
+}
+
 /* post_set hooks */
 static void
 cfgk_post_mark_server(mqvpn_file_config_t *cfg)
@@ -474,6 +489,17 @@ cfgk_post_mirror_auth_key(mqvpn_file_config_t *cfg)
 {
     /* INI [Auth] Key is mode-agnostic: mirror into server_auth_key. */
     snprintf(cfg->server_auth_key, sizeof(cfg->server_auth_key), "%s", cfg->auth_key);
+}
+
+static void
+cfgk_post_warn_server_auth_key(mqvpn_file_config_t *cfg)
+{
+    /* JSON-only row (ini_key NULL), so this fires only for JSON configs.
+     * The key was never documented and 'auth_key' serves both roles via the
+     * effective-key fallback in main.c; accepted for compatibility until
+     * removal in a future release. */
+    (void)cfg;
+    LOG_WRN("JSON: 'server_auth_key' is deprecated; use 'auth_key'");
 }
 
 static void
@@ -554,7 +580,8 @@ static const cfg_key_desc_t cfg_keys[] = {
     /* [Auth] — INI Key is mode-agnostic dual-write; JSON has two keys */
     CFG_STR_POST(SEC_AUTH, "Key", NULL, auth_key, cfgk_post_mirror_auth_key),
     CFG_STR(SEC_AUTH, NULL, "auth_key", auth_key),
-    CFG_STR(SEC_AUTH, NULL, "server_auth_key", server_auth_key),
+    CFG_STR_POST(SEC_AUTH, NULL, "server_auth_key", server_auth_key,
+                 cfgk_post_warn_server_auth_key),
     CFG_INT_FB(SEC_AUTH, "MaxClients", "max_clients", max_clients, cfgk_int_positive, 64),
     /* [Control] */
     CFG_STR(SEC_CONTROL, "Listen", "control_listen", control_listen),
@@ -567,6 +594,18 @@ static const cfg_key_desc_t cfg_keys[] = {
             client_mgmt_socket_group),
     /* [Multipath] */
     CFG_STR(SEC_MULTIPATH, "Scheduler", "scheduler", scheduler),
+    CFG_BOOL(SEC_MULTIPATH, "AllowClientScheduler", "allow_client_scheduler",
+             allow_client_scheduler),
+    CFG_BOOL(SEC_MULTIPATH, "RequestServerScheduler", "request_server_scheduler",
+             request_server_scheduler),
+    CFG_STR(SEC_MULTIPATH, "Reinjection", "reinjection", reinjection),
+    CFG_INT_FB(SEC_MULTIPATH, "ReinjectionSrttFactorPct", "reinjection_srtt_factor_pct",
+               reinjection_srtt_factor_pct, cfgk_int_reinj_factor_pct, 110),
+    CFG_INT_FB(SEC_MULTIPATH, "ReinjectionHardDeadlineMs", "reinjection_hard_deadline_ms",
+               reinjection_hard_deadline_ms, cfgk_int_reinj_deadline_ms, 500),
+    CFG_INT_FB(SEC_MULTIPATH, "ReinjectionDeadlineLowerBoundMs",
+               "reinjection_deadline_lower_bound_ms", reinjection_deadline_lower_bound_ms,
+               cfgk_int_reinj_deadline_ms, 20),
     CFG_STR(SEC_MULTIPATH, "CC", "cc", cc),
     CFG_U64(SEC_MULTIPATH, "InitMaxPathId", "init_max_path_id", init_max_path_id,
             MQVPN_INIT_MAX_PATH_ID_MAX),
@@ -606,6 +645,13 @@ static const cfg_key_desc_t cfg_keys[] = {
             hybrid.tcp_connect_timeout_sec),
     CFG_U32(SEC_HYBRID, "TcpMaxGlobalFlows", "tcp_max_global_flows",
             hybrid.tcp_max_global_flows),
+    /* [Advanced] — JSON side lives inside the bounded "advanced" object.
+     * Max mirrors the public setter: above it, xquic's rate x srtt(us)
+     * u64 window product overflows (see MQVPN_RECV_RATE_LIMIT_MAX). */
+    CFG_U64(SEC_ADVANCED, "RecvRateLimit", "recv_rate_limit", recv_rate_limit,
+            MQVPN_RECV_RATE_LIMIT_MAX),
+    CFG_BOOL(SEC_ADVANCED, "UdpGso", "udp_gso", udp_gso),
+    CFG_BOOL(SEC_ADVANCED, "UdpGro", "udp_gro", udp_gro),
 };
 
 /* Shared typed store. Returns 0 on success, -1 on invalid value (caller
@@ -721,12 +767,14 @@ cfg_key_apply_ini(mqvpn_file_config_t *cfg, int section, const char *key, const 
 
 /* JSON-side walker: applies every table row that has a json_key. SEC_REORDER
  * rows are searched inside [ro_raw, ro_end) (the bounded "reorder" object),
- * SEC_HYBRID rows inside [hy_raw, hy_end) (the bounded "hybrid" object);
+ * SEC_HYBRID rows inside [hy_raw, hy_end) (the bounded "hybrid" object),
+ * SEC_ADVANCED rows inside [adv_raw, adv_end) (the bounded "advanced" object);
  * everything else at top level. Absent keys are silent (forward-compat);
  * present-but-invalid keys warn. */
 static void
 cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *ro_raw,
-                   const char *ro_end, const char *hy_raw, const char *hy_end)
+                   const char *ro_end, const char *hy_raw, const char *hy_end,
+                   const char *adv_raw, const char *adv_end)
 {
     /* Must cover the largest CFGK_STR destination (listen/server_addr/
      * control_listen, all char[280]) or JSON strings would truncate
@@ -743,6 +791,9 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         } else if (d->section == SEC_HYBRID) {
             if (!hy_raw || !hy_end) continue;
             v = json_find_key_bounded(hy_raw, hy_end, d->json_key);
+        } else if (d->section == SEC_ADVANCED) {
+            if (!adv_raw || !adv_end) continue;
+            v = json_find_key_bounded(adv_raw, adv_end, d->json_key);
         } else {
             v = json_find_key(json_text, d->json_key);
         }
@@ -785,9 +836,10 @@ cfg_key_apply_json(mqvpn_file_config_t *cfg, const char *json_text, const char *
         }
         if (rc < 0)
             LOG_WRN("JSON: invalid %s%s; %s",
-                    d->section == SEC_REORDER  ? "reorder "
-                    : d->section == SEC_HYBRID ? "hybrid "
-                                               : "",
+                    d->section == SEC_REORDER    ? "reorder "
+                    : d->section == SEC_HYBRID   ? "hybrid "
+                    : d->section == SEC_ADVANCED ? "advanced "
+                                                 : "",
                     d->json_key, d->has_invalid_fallback ? "using default" : "ignoring");
     }
 }
@@ -1102,8 +1154,14 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     const char *hy_raw = json_find_key(json_text, "hybrid");
     const char *hy_end = (hy_raw && *hy_raw == '{') ? json_object_end(hy_raw) : NULL;
 
+    /* [Advanced] equivalent: an "advanced" object holding the same flat
+     * scalar knobs as the INI section (snake_case). Bounded the same way
+     * as "reorder"/"hybrid". */
+    const char *adv_raw = json_find_key(json_text, "advanced");
+    const char *adv_end = (adv_raw && *adv_raw == '{') ? json_object_end(adv_raw) : NULL;
+
     /* All scalar keys — one walk of the shared descriptor table. */
-    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end, hy_raw, hy_end);
+    cfg_key_apply_json(cfg, json_text, ro_raw, ro_end, hy_raw, hy_end, adv_raw, adv_end);
 
     /* [Hybrid] EgressAllow/EgressDeny — hand-coded like "users" below,
      * bounded to the "hybrid" object span like every other hybrid key. */
@@ -1228,10 +1286,16 @@ mqvpn_config_defaults(mqvpn_file_config_t *cfg)
     snprintf(cfg->key_file, sizeof(cfg->key_file), "server.key");
     snprintf(cfg->scheduler, sizeof(cfg->scheduler), "wlb");
     snprintf(cfg->cc, sizeof(cfg->cc), "bbr2");
+    snprintf(cfg->reinjection, sizeof(cfg->reinjection), "off");
+    cfg->reinjection_srtt_factor_pct = 110;
+    cfg->reinjection_hard_deadline_ms = 500;
+    cfg->reinjection_deadline_lower_bound_ms = 20;
     cfg->max_clients = 64;
     cfg->reconnect = 1;
     cfg->reconnect_interval = 5;
     cfg->manage_routes = 1;
+    cfg->udp_gso = 1;
+    cfg->udp_gro = 1;
     cfg->client_mgmt_enabled = 1; /* [ClientManagement] Enabled default: on */
     mqvpn_reorder_config_default(&cfg->reorder); /* §16: reorder defaults (mode OFF) */
     mqvpn_hybrid_config_default(&cfg->hybrid);   /* H1: hybrid defaults (disabled) */

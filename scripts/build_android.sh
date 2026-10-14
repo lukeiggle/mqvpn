@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) 2026 mp0rta and mqvpn contributors
 #
 # build_android.sh — Cross-compile libmqvpn + xquic + BoringSSL for Android
 #
@@ -49,6 +51,7 @@ fi
 
 XQUIC_DIR="${PROJECT_ROOT}/third_party/xquic"
 BORINGSSL_DIR="${XQUIC_DIR}/third_party/boringssl"
+source "${PROJECT_ROOT}/scripts/bssl_build_guard.sh"
 PREBUILT_BASE="${PROJECT_ROOT}/android/sdk-native/prebuilt"
 
 echo "=== Android cross-compile ==="
@@ -66,10 +69,16 @@ for ABI in $ABIS; do
 
     # ── 1. BoringSSL ──
     BSSL_BUILD="${BUILD_DIR}/boringssl"
+    # Provenance guard BEFORE the skip check: without it, archives left by a
+    # previous pin satisfy the check below and the bump never builds at all
+    # (bssl_build_guard.sh). A wiped dir falls through to a fresh build.
+    bssl_guard_build_dir "$BORINGSSL_DIR" "$BSSL_BUILD"
     if [[ ! -f "${BSSL_BUILD}/libssl.a" ]] && [[ ! -f "${BSSL_BUILD}/ssl/libssl.a" ]]; then
         echo "  [1/3] Building BoringSSL..."
         mkdir -p "$BSSL_BUILD"
         cmake -S "$BORINGSSL_DIR" -B "$BSSL_BUILD" \
+            -DCMAKE_C_FLAGS="-ffile-prefix-map=$PROJECT_ROOT=/mqvpn" \
+            -DCMAKE_CXX_FLAGS="-ffile-prefix-map=$PROJECT_ROOT=/mqvpn" \
             -DCMAKE_TOOLCHAIN_FILE="$NDK_CMAKE" \
             -DANDROID_ABI="$ABI" \
             -DANDROID_NATIVE_API_LEVEL="$API_LEVEL" \
@@ -78,6 +87,7 @@ for ABI in $ABIS; do
             -G "$CMAKE_GEN" \
             > /dev/null 2>&1
         cmake --build "$BSSL_BUILD" --target ssl --target crypto -j"$JOBS" > /dev/null 2>&1
+        bssl_stamp_build_dir "$BORINGSSL_DIR" "$BSSL_BUILD"
     else
         echo "  [1/3] BoringSSL (cached)"
     fi
@@ -107,7 +117,7 @@ for ABI in $ABIS; do
             -DANDROID_ABI="$ABI" \
             -DANDROID_NATIVE_API_LEVEL="$API_LEVEL" \
             -DCMAKE_BUILD_TYPE=MinSizeRel \
-            -DCMAKE_C_FLAGS="-Wno-unknown-warning-option" \
+            -DCMAKE_C_FLAGS="-Wno-unknown-warning-option -ffile-prefix-map=$PROJECT_ROOT=/mqvpn" \
             -DSSL_TYPE=boringssl \
             -DSSL_PATH="$BSSL_BUILD" \
             -DSSL_INC_PATH="${BORINGSSL_DIR}/include" \
@@ -134,6 +144,7 @@ for ABI in $ABIS; do
     echo "  [3/3] Building libmqvpn..."
     mkdir -p "$MQ_BUILD"
     cmake -S "$PROJECT_ROOT" -B "$MQ_BUILD" \
+        -DCMAKE_C_FLAGS="-ffile-prefix-map=$PROJECT_ROOT=/mqvpn" \
         -DCMAKE_TOOLCHAIN_FILE="$NDK_CMAKE" \
         -DANDROID_ABI="$ABI" \
         -DANDROID_NATIVE_API_LEVEL="$API_LEVEL" \

@@ -4,9 +4,11 @@
 /*
  * test_config.c — unit tests for INI config parser
  *
- * Build: cc -o tests/test_config tests/test_config.c src/config.c src/log.c -Isrc
+ * Build: cc -o tests/test_config tests/test_config.c src/config.c src/log.c \
+ *            -Isrc -Iinclude
  */
 #include "config.h"
+#include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
 #include "mqvpn_sched_names.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,6 +94,13 @@ test_defaults(void)
     ASSERT_EQ_INT(cfg.n_dns, 0, "default n_dns");
     ASSERT_EQ_STR(cfg.scheduler, "wlb", "default scheduler");
     ASSERT_EQ_STR(cfg.cc, "bbr2", "default cc");
+    ASSERT_EQ_STR(cfg.reinjection, "off", "default reinjection");
+    ASSERT_EQ_INT(cfg.reinjection_srtt_factor_pct, 110,
+                  "default reinjection_srtt_factor_pct");
+    ASSERT_EQ_INT(cfg.reinjection_hard_deadline_ms, 500,
+                  "default reinjection_hard_deadline_ms");
+    ASSERT_EQ_INT(cfg.reinjection_deadline_lower_bound_ms, 20,
+                  "default reinjection_deadline_lower_bound_ms");
     ASSERT_EQ_INT(cfg.is_server, 0, "default is_server");
     ASSERT_EQ_STR(cfg.server_addr, "", "default server_addr");
     ASSERT_EQ_STR(cfg.auth_key, "", "default auth_key");
@@ -613,6 +622,59 @@ test_max_clients_edge_cases(void)
     mqvpn_config_load(&cfg, path);
     unlink(path);
     ASSERT_EQ_INT(cfg.max_clients, 128, "MaxClients=128 → 128");
+}
+
+static void
+test_parse_reinjection_config(void)
+{
+    /* Valid [Multipath] Reinjection* keys parse into the struct. */
+    const char *ini = "[Multipath]\n"
+                      "Reinjection = deadline\n"
+                      "ReinjectionSrttFactorPct = 150\n"
+                      "ReinjectionHardDeadlineMs = 300\n"
+                      "ReinjectionDeadlineLowerBoundMs = 10\n";
+
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "reinjection config parse ok");
+    ASSERT_EQ_STR(cfg.reinjection, "deadline", "reinjection");
+    ASSERT_EQ_INT(cfg.reinjection_srtt_factor_pct, 150, "reinjection_srtt_factor_pct");
+    ASSERT_EQ_INT(cfg.reinjection_hard_deadline_ms, 300, "reinjection_hard_deadline_ms");
+    ASSERT_EQ_INT(cfg.reinjection_deadline_lower_bound_ms, 10,
+                  "reinjection_deadline_lower_bound_ms");
+}
+
+static void
+test_reinjection_out_of_range_falls_back(void)
+{
+    /* ReinjectionSrttFactorPct = 50 → below min (100) → fallback to 110 */
+    char *path = write_tmp("[Multipath]\nReinjectionSrttFactorPct = 50\n");
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.reinjection_srtt_factor_pct, 110,
+                  "ReinjectionSrttFactorPct=50 → default 110");
+
+    /* ReinjectionHardDeadlineMs = 0 → below min (1) → fallback to 500 */
+    path = write_tmp("[Multipath]\nReinjectionHardDeadlineMs = 0\n");
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.reinjection_hard_deadline_ms, 500,
+                  "ReinjectionHardDeadlineMs=0 → default 500");
+
+    /* ReinjectionDeadlineLowerBoundMs = 999999 → above max (60000) → fallback to 20 */
+    path = write_tmp("[Multipath]\nReinjectionDeadlineLowerBoundMs = 999999\n");
+    mqvpn_config_defaults(&cfg);
+    mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(cfg.reinjection_deadline_lower_bound_ms, 20,
+                  "ReinjectionDeadlineLowerBoundMs=999999 → default 20");
 }
 
 static void
@@ -1590,6 +1652,96 @@ test_hybrid_section_parse(void)
     ASSERT_EQ_INT((int)cfg.hybrid.tcp_idle_timeout_sec, 60, "hybrid json idle timeout");
 }
 
+static void
+test_advanced_recv_rate_limit(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 0, 1, "recv_rate_limit default 0");
+
+    char *p = write_tmp("[Advanced]\nRecvRateLimit = 125000000\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 125000000ULL, 1, "ini recv_rate_limit");
+
+    p = write_tmp("{\"advanced\": {\"recv_rate_limit\": 125000000}}");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced json load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 125000000ULL, 1, "json recv_rate_limit");
+
+    /* Range cap (MQVPN_RECV_RATE_LIMIT_MAX): values above it must be
+     * rejected (warn-and-continue, field keeps its default) — an
+     * over-range rate would overflow xquic's rate x srtt(us) u64 window
+     * product and pin the window at the MINIMUM, the opposite of intent. */
+    char over[128];
+    snprintf(over, sizeof(over), "[Advanced]\nRecvRateLimit = %llu\n",
+             (unsigned long long)MQVPN_RECV_RATE_LIMIT_MAX + 1);
+    p = write_tmp(over);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "over-max ini warns, load rc 0");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 0, 1, "over-max ini rejected → default 0");
+
+    snprintf(over, sizeof(over), "[Advanced]\nRecvRateLimit = %llu\n",
+             (unsigned long long)MQVPN_RECV_RATE_LIMIT_MAX);
+    p = write_tmp(over);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "boundary ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == MQVPN_RECV_RATE_LIMIT_MAX, 1,
+                  "boundary value == max accepted");
+
+    snprintf(over, sizeof(over), "{\"advanced\": {\"recv_rate_limit\": %llu}}",
+             (unsigned long long)MQVPN_RECV_RATE_LIMIT_MAX + 1);
+    p = write_tmp(over);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "over-max json warns, load rc 0");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.recv_rate_limit == 0, 1, "over-max json rejected → default 0");
+}
+
+static void
+test_advanced_udp_gso(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.udp_gso, 1, "udp_gso default 1 (absent)");
+
+    char *p = write_tmp("[Advanced]\nUdpGso = false\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.udp_gso, 0, "ini UdpGso=false");
+
+    p = write_tmp("{\"advanced\": {\"udp_gso\": false}}");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced json load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.udp_gso, 0, "json udp_gso=false");
+}
+
+static void
+test_advanced_udp_gro(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(cfg.udp_gro, 1, "udp_gro default 1 (absent)");
+
+    char *p = write_tmp("[Advanced]\nUdpGro = false\n");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced ini load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.udp_gro, 0, "ini UdpGro=false");
+
+    p = write_tmp("{\"advanced\": {\"udp_gro\": false}}");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load(&cfg, p), 0, "advanced json load ok");
+    unlink(p);
+    ASSERT_EQ_INT(cfg.udp_gro, 0, "json udp_gro=false");
+}
+
 /* ── [Hybrid] EgressAllow/EgressDeny lists + TcpConnectTimeoutSec ───────── */
 
 static void
@@ -1738,8 +1890,14 @@ test_ini_json_scalar_parity(void)
                       "SocketGroup = mqvpnparity\n"
                       "[Multipath]\n"
                       "Scheduler = min_srtt\n"
+                      "AllowClientScheduler = true\n"
+                      "RequestServerScheduler = true\n"
                       "CC = cubic\n"
                       "InitMaxPathId = 16\n"
+                      "Reinjection = deadline\n"
+                      "ReinjectionSrttFactorPct = 150\n"
+                      "ReinjectionHardDeadlineMs = 300\n"
+                      "ReinjectionDeadlineLowerBoundMs = 10\n"
                       "[Reorder]\n"
                       "Enabled = on\n"
                       "MaxWaitMs = 55\n"
@@ -1760,7 +1918,11 @@ test_ini_json_scalar_parity(void)
                       "TcpMaxFlows = 128\n"
                       "TcpIdleTimeoutSec = 60\n"
                       "TcpConnectTimeoutSec = 20\n"
-                      "TcpMaxGlobalFlows = 8192\n";
+                      "TcpMaxGlobalFlows = 8192\n"
+                      "[Advanced]\n"
+                      "RecvRateLimit = 77\n"
+                      "UdpGso = false\n"
+                      "UdpGro = false\n";
     /* NOTE: [Auth] Key is INI-only dual-write (auth_key + server_auth_key);
      * mirror it in JSON by setting BOTH json keys to the same value. */
     const char *ini_auth_extra = "[Auth]\nKey = parity-secret\n";
@@ -1789,8 +1951,14 @@ test_ini_json_scalar_parity(void)
                        "\"client_mgmt_socket_mode\":\"0640\","
                        "\"client_mgmt_socket_group\":\"mqvpnparity\","
                        "\"scheduler\":\"min_srtt\","
+                       "\"allow_client_scheduler\":true,"
+                       "\"request_server_scheduler\":true,"
                        "\"cc\":\"cubic\","
                        "\"init_max_path_id\":16,"
+                       "\"reinjection\":\"deadline\","
+                       "\"reinjection_srtt_factor_pct\":150,"
+                       "\"reinjection_hard_deadline_ms\":300,"
+                       "\"reinjection_deadline_lower_bound_ms\":10,"
                        "\"reorder\":{"
                        "\"enabled\":\"on\","
                        "\"max_wait_ms\":55,"
@@ -1813,6 +1981,11 @@ test_ini_json_scalar_parity(void)
                        "\"tcp_idle_timeout_sec\":60,"
                        "\"tcp_connect_timeout_sec\":20,"
                        "\"tcp_max_global_flows\":8192"
+                       "},"
+                       "\"advanced\":{"
+                       "\"recv_rate_limit\":77,"
+                       "\"udp_gso\":false,"
+                       "\"udp_gro\":false"
                        "}"
                        "}";
 
@@ -1838,6 +2011,14 @@ test_ini_json_scalar_parity(void)
     ASSERT_EQ_INT(a.max_clients, b.max_clients, "parity max_clients");
     ASSERT_EQ_INT((int)a.init_max_path_id, (int)b.init_max_path_id,
                   "parity init_max_path_id");
+    ASSERT_EQ_STR(a.reinjection, b.reinjection, "parity reinjection");
+    ASSERT_EQ_INT(a.reinjection_srtt_factor_pct, b.reinjection_srtt_factor_pct,
+                  "parity reinjection_srtt_factor_pct");
+    ASSERT_EQ_INT(a.reinjection_hard_deadline_ms, b.reinjection_hard_deadline_ms,
+                  "parity reinjection_hard_deadline_ms");
+    ASSERT_EQ_INT(a.reinjection_deadline_lower_bound_ms,
+                  b.reinjection_deadline_lower_bound_ms,
+                  "parity reinjection_deadline_lower_bound_ms");
     ASSERT_EQ_STR(a.auth_key, b.auth_key, "parity auth_key");
     ASSERT_EQ_STR(a.server_auth_key, b.server_auth_key, "parity server_auth_key");
     ASSERT_EQ_INT(a.client_mgmt_enabled, b.client_mgmt_enabled,
@@ -1857,6 +2038,12 @@ test_ini_json_scalar_parity(void)
                   "parity has_explicit_cap");
     ASSERT_EQ_INT((int)a.reorder.classify_window, (int)b.reorder.classify_window,
                   "parity classify_window");
+    ASSERT_EQ_INT(a.allow_client_scheduler, 1, "parity ini allow_client_scheduler");
+    ASSERT_EQ_INT(a.request_server_scheduler, 1, "parity ini request_server_scheduler");
+    ASSERT_EQ_INT(a.allow_client_scheduler, b.allow_client_scheduler,
+                  "parity allow_client_scheduler");
+    ASSERT_EQ_INT(a.request_server_scheduler, b.request_server_scheduler,
+                  "parity request_server_scheduler");
     ASSERT_EQ_INT(a.hybrid.enabled, b.hybrid.enabled, "parity hybrid enabled");
     ASSERT_EQ_INT(a.hybrid.tcp_mode, b.hybrid.tcp_mode, "parity hybrid tcp_mode");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_flows, (int)b.hybrid.tcp_max_flows,
@@ -1868,11 +2055,22 @@ test_ini_json_scalar_parity(void)
                   "parity hybrid tcp_connect_timeout_sec");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_global_flows, (int)b.hybrid.tcp_max_global_flows,
                   "parity hybrid tcp_max_global_flows");
+    ASSERT_EQ_INT((int)a.recv_rate_limit, (int)b.recv_rate_limit,
+                  "parity advanced recv_rate_limit");
+    ASSERT_EQ_INT(a.udp_gso, b.udp_gso, "parity advanced udp_gso");
+    ASSERT_EQ_INT(a.udp_gro, b.udp_gro, "parity advanced udp_gro");
 
     /* Non-default guards: prove these asserts pass because the value was
      * actually parsed, not because it silently failed to parse on BOTH
      * sides and both structs just kept the (equal) default. */
     ASSERT_EQ_INT(a.tun_mtu, 1420, "parity mtu is non-default");
+    ASSERT_EQ_STR(a.reinjection, "deadline", "parity reinjection is non-default");
+    ASSERT_EQ_INT(a.reinjection_srtt_factor_pct, 150,
+                  "parity reinjection_srtt_factor_pct is non-default");
+    ASSERT_EQ_INT(a.reinjection_hard_deadline_ms, 300,
+                  "parity reinjection_hard_deadline_ms is non-default");
+    ASSERT_EQ_INT(a.reinjection_deadline_lower_bound_ms, 10,
+                  "parity reinjection_deadline_lower_bound_ms is non-default");
     ASSERT_EQ_INT((int)a.reorder.max_flows, 77,
                   "parity reorder max_flows is non-default");
     ASSERT_EQ_INT((int)a.reorder.classify_window, 33,
@@ -1887,6 +2085,10 @@ test_ini_json_scalar_parity(void)
                   "parity hybrid tcp_connect_timeout_sec is non-default");
     ASSERT_EQ_INT((int)a.hybrid.tcp_max_global_flows, 8192,
                   "parity hybrid tcp_max_global_flows is non-default");
+    ASSERT_EQ_INT((int)a.recv_rate_limit, 77,
+                  "parity advanced recv_rate_limit is non-default");
+    ASSERT_EQ_INT(a.udp_gso, 0, "parity advanced udp_gso is non-default");
+    ASSERT_EQ_INT(a.udp_gro, 0, "parity advanced udp_gro is non-default");
     ASSERT_EQ_INT(a.client_mgmt_enabled, 0, "parity client_mgmt_enabled is non-default");
     ASSERT_EQ_STR(a.client_mgmt_endpoint, "/run/mqvpn/parity.sock",
                   "parity client_mgmt_endpoint is non-default");
@@ -2020,11 +2222,21 @@ test_sched_cc_name_roundtrip(void)
     MQVPN_CC_LIST(MQVPN_CC_ROUNDTRIP_CHECK)
 #undef MQVPN_CC_ROUNDTRIP_CHECK
 
+#define MQVPN_REINJ_ROUNDTRIP_CHECK(enum_val, str)                                     \
+    ASSERT_EQ_INT(mqvpn_reinj_from_name(str), (int)(enum_val),                         \
+                  "reinj from_name(" str ") == " #enum_val);                           \
+    ASSERT_EQ_STR(mqvpn_reinj_to_name(enum_val), str, "reinj to_name(" #enum_val ")"); \
+    ASSERT_TRUE(mqvpn_reinj_is_valid(enum_val), "reinj is_valid(" #enum_val ")");
+    MQVPN_REINJ_LIST(MQVPN_REINJ_ROUNDTRIP_CHECK)
+#undef MQVPN_REINJ_ROUNDTRIP_CHECK
+
     /* Unrecognized strings must be rejected by both tables. */
     ASSERT_EQ_INT(mqvpn_sched_from_name("bogus"), -1, "sched from_name(bogus)");
     ASSERT_EQ_INT(mqvpn_sched_from_name(NULL), -1, "sched from_name(NULL)");
     ASSERT_EQ_INT(mqvpn_cc_from_name("bogus"), -1, "cc from_name(bogus)");
     ASSERT_EQ_INT(mqvpn_cc_from_name(NULL), -1, "cc from_name(NULL)");
+    ASSERT_EQ_INT(mqvpn_reinj_from_name("bogus"), -1, "reinj from_name(bogus)");
+    ASSERT_EQ_INT(mqvpn_reinj_from_name(NULL), -1, "reinj from_name(NULL)");
 }
 
 int
@@ -2053,6 +2265,8 @@ main(void)
     test_max_paths_exceeded();
     test_max_paths_exceeded_json();
     test_max_clients_edge_cases();
+    test_parse_reinjection_config();
+    test_reinjection_out_of_range_falls_back();
     test_empty_value();
     test_duplicate_keys_last_wins();
     test_case_insensitive_section();
@@ -2126,6 +2340,9 @@ main(void)
     /* [Hybrid] section tests */
     test_hybrid_defaults_when_absent();
     test_hybrid_section_parse();
+    test_advanced_recv_rate_limit();
+    test_advanced_udp_gso();
+    test_advanced_udp_gro();
     test_hybrid_egress_acl_ini();
     test_hybrid_egress_acl_ini_invalid_ignored();
     test_hybrid_egress_acl_ini_v6();

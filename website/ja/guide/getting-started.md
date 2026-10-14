@@ -1,6 +1,6 @@
 # はじめに
 
-mqvpn は MASQUE CONNECT-IP (RFC 9484) を使用し、Multipath QUIC 上で標準準拠の IP トンネリングを実現するマルチパス QUIC VPN です。
+mqvpn は MASQUE CONNECT-IP (RFC 9484) と、Multipath QUIC をベースとしたL3 マルチパス VPN です。
 
 ## インストール
 
@@ -30,6 +30,7 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
 
 ::: warning
 install.sh は自己署名証明書を生成します。クライアント接続時には `--insecure` が必要です。本番環境では Let's Encrypt などの信頼された証明書に置き換え、`--insecure` を省略してください。
+`--cert` (設定ファイルでは `Cert` / `cert_file`) には fullchain (Let's Encrypt では `fullchain.pem`) を指定してください。クライアントは足りない中間証明書を取りに行きません。
 :::
 
 ### クライアント（deb パッケージ）
@@ -114,7 +115,10 @@ mqvpn --mode client|server [options]
   --subnet6 CIDR         クライアント IPv6 プール（サーバー）
   --cert PATH            TLS 証明書（サーバー）
   --key PATH             TLS 秘密鍵（サーバー）
-  --scheduler minrtt|wlb マルチパススケジューラ（デフォルト: wlb）
+  --scheduler SCHED      マルチパススケジューラ: minrtt|wlb|wlb_udp_pin|backup_fec
+                         （デフォルト: wlb）
+  --cc ALGO              輻輳制御アルゴリズム: bbr2|bbr|cubic|none（デフォルト: bbr2）
+  --mtu N                TUN MTU（1280-9000、デフォルト: auto）
   --max-clients N        最大同時接続クライアント数（サーバー、デフォルト: 64）
   --control-port PORT    Control API の TCP ポート（サーバー）
   --control-addr ADDR    Control API のバインドアドレス（デフォルト: 127.0.0.1）
@@ -122,7 +126,9 @@ mqvpn --mode client|server [options]
   --log-level LVL        ログレベル（debug|info|warn|error）
   --no-reconnect         自動再接続を無効化（クライアント）
   --kill-switch          VPN 外への通信を遮断（クライアント）
+  --no-manage-routes     ホストのルーティングテーブルを変更しない（クライアント）
   --genkey               PSK を生成して終了
+  --version              バージョンを表示して終了
   --help                 すべてのオプションを表示
 ```
 

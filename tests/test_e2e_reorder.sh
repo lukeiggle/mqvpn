@@ -34,6 +34,10 @@
 #     NO reorder negotiation occurs (markers absent), proving the feature is a
 #     no-op when disabled.
 #
+#   Phase D (mixed): client Enabled=on, server Enabled=off. The server does not
+#     echo mqvpn-reorder, so the client never stamps; its TUN MTU must then be
+#     the reorder-OFF MTU, not 8 bytes less.
+#
 # How reorder is enabled: the harness (bench_start_vpn_*) only takes CLI flags,
 # and there is no CLI flag for the [Reorder] section — it is INI/JSON only
 # (src/config.c SEC_REORDER). mqvpn's --config loads the file as a base and CLI
@@ -59,11 +63,15 @@ CLIENT_LOG="$(mktemp)"
 SERVER_LOG="$(mktemp)"
 CLIENT_LOG_OFF="$(mktemp)"
 SERVER_LOG_OFF="$(mktemp)"
+CLIENT_LOG_MIX="$(mktemp)"
+SERVER_LOG_MIX="$(mktemp)"
 INI_ON="$(mktemp --suffix=.ini)"
 INI_OFF="$(mktemp --suffix=.ini)"
+IPERF_SRV_JSON="$(mktemp --suffix=.json)"
 
 trap 'bench_cleanup; rm -f "$CLIENT_LOG" "$SERVER_LOG" "$CLIENT_LOG_OFF" \
-    "$SERVER_LOG_OFF" "$INI_ON" "$INI_OFF"' EXIT
+    "$SERVER_LOG_OFF" "$CLIENT_LOG_MIX" "$SERVER_LOG_MIX" "$INI_ON" "$INI_OFF" \
+    "$IPERF_SRV_JSON"' EXIT
 
 fail=0
 
@@ -80,14 +88,16 @@ bench_check_test_deps nc jq
 #
 # MaxWaitMs = 60 is chosen ABOVE the 40ms path-B spread (netem below) on purpose:
 # the late packet from the slow path then arrives WITHIN the reorder wait window,
-# so the buffered gap actually FILLS (gap_filled_count>0) instead of timing out.
-# This lets Phase B prove the engine genuinely re-orders packets, not merely that
-# it activates. (With the default 30ms wait < 40ms spread, every period would
-# time out — the §24 H5 "wait < RTT spread" regime where the shim only adds cost.)
+# so packets buffered behind it are released by its arrival (~40ms), inside the
+# configured wait. This lets Phase B prove the engine genuinely re-orders
+# packets, not merely that it activates. (The default 30ms wait < 40ms spread is
+# the §24 H5 "wait < RTT spread" regime; Phase B's too-late check rejects it.)
+MAX_WAIT_MS=60
+PATH_B_DELAY_MS=40
 cat >"$INI_ON" <<EOF
 [Reorder]
 Enabled = on
-MaxWaitMs = 60
+MaxWaitMs = ${MAX_WAIT_MS}
 
 [ReorderRule]
 Proto = udp
@@ -106,13 +116,13 @@ bench_add_server_host_routes "$N_PATHS"
 # Path A (slot 0): low latency. Path B (slot 1): +40ms one-way delay. The RTT
 # asymmetry across the two striped paths is what produces out-of-order arrival
 # at the receiver, which is exactly what the reorder buffer must absorb.
-bench_apply_netem "delay 1ms" "delay 40ms"
+bench_apply_netem "delay 1ms" "delay ${PATH_B_DELAY_MS}ms"
 
 # Helper: run one full server+client lifecycle with a given INI + log files.
-# $1 = INI path, $2 = server log, $3 = client log
+# $1 = INI path, $2 = server log, $3 = client log, $4 = server INI (default $1)
 reorder_run() {
-    local ini="$1" slog="$2" clog="$3"
-    bench_start_vpn_server "--control-port ${CTRL_PORT} --config ${ini}" "$slog"
+    local ini="$1" slog="$2" clog="$3" sini="${4:-$1}"
+    bench_start_vpn_server "--control-port ${CTRL_PORT} --config ${sini}" "$slog"
 
     local paths_arg=""
     local i
@@ -140,18 +150,40 @@ extract_client_mtu() {
 # engine) or "ping" (low-rate fallback that may NOT generate enough in-flight
 # packets to arm a reorder period) so the caller can decide whether the
 # "engine fired" (gap_count>0) check is a hard assertion or informational.
+# Under iperf3 it also sets WORKLOAD_OOO / WORKLOAD_PKTS from the iperf3 SERVER's
+# report — what the inner receiver saw, i.e. the ordering the shim exists to fix.
+# (The client's copy of out_of_order is the sender side and always 0.)
 WORKLOAD_KIND=""
+WORKLOAD_OOO=""
+WORKLOAD_PKTS=""
 run_inner_udp_workload() {
+    WORKLOAD_OOO=""
+    WORKLOAD_PKTS=""
     if command -v iperf3 >/dev/null 2>&1; then
-        ip netns exec "$NS_SERVER" iperf3 -s -p "$INNER_UDP_PORT" -1 -D \
+        : >"$IPERF_SRV_JSON"
+        ip netns exec "$NS_SERVER" iperf3 -s -p "$INNER_UDP_PORT" -1 -D -J \
+            --logfile "$IPERF_SRV_JSON" \
             --pidfile /tmp/iperf3-reorder.pid >/dev/null 2>&1 || true
         sleep 1
         # -u UDP, modest rate, short run; --cport pins client src port too so the
         # 4-tuple's dst port matches the ReorderRule. dst port = INNER_UDP_PORT.
         if ip netns exec "$NS_CLIENT" iperf3 -c "$TUNNEL_SERVER_IP" \
                 -p "$INNER_UDP_PORT" -u -b 20M -l 1200 -t 6 >/dev/null 2>&1; then
-            kill "$(cat /tmp/iperf3-reorder.pid 2>/dev/null)" 2>/dev/null || true
+            # -1 makes the server exit on its own once it has written the report;
+            # give it a moment before the kill below, or the JSON is truncated.
+            srv_pid="$(cat /tmp/iperf3-reorder.pid 2>/dev/null || true)"
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+                if [ -z "$srv_pid" ] || ! kill -0 "$srv_pid" 2>/dev/null; then
+                    break
+                fi
+                sleep 0.3
+            done
+            kill "$srv_pid" 2>/dev/null || true
             rm -f /tmp/iperf3-reorder.pid
+            WORKLOAD_OOO=$(jq '.end.streams[0].udp.out_of_order // empty' \
+                "$IPERF_SRV_JSON" 2>/dev/null || true)
+            WORKLOAD_PKTS=$(jq '.end.streams[0].udp.packets // empty' \
+                "$IPERF_SRV_JSON" 2>/dev/null || true)
             WORKLOAD_KIND="iperf3"
             return 0
         fi
@@ -211,6 +243,8 @@ else
     echo "FAIL: inner UDP workload did not complete"
     fail=1
 fi
+ooo_on="$WORKLOAD_OOO"
+pkts_on="$WORKLOAD_PKTS"
 
 # Confirm traffic actually traversed the tunnel via the control API.
 status_on="$(bench_query_control "$CTRL_PORT" get_status)"
@@ -240,8 +274,12 @@ gap_filled=$(echo "$reorder_stats"     | jq '.reorder.gap_filled_count // 0'  2>
 gap_timeout=$(echo "$reorder_stats"    | jq '.reorder.gap_timeout_count // 0' 2>/dev/null || echo 0)
 delivered=$(echo "$reorder_stats"      | jq '.reorder.delivered_count // 0'   2>/dev/null || echo 0)
 ack_demote=$(echo "$reorder_stats"     | jq '.reorder.ack_demote_count // 0'  2>/dev/null || echo 0)
+too_late=$(echo "$reorder_stats"       | jq '.reorder.too_late_drop_count // 0' 2>/dev/null || echo 0)
+lat_max_ms=$(echo "$reorder_stats"     | jq '.reorder.added_latency_max_ms // 0' 2>/dev/null || echo 0)
+too_far_ahead=$(echo "$reorder_stats" | jq '.reorder.too_far_ahead_drop_count // 0' 2>/dev/null || echo 0)
+gap_overflow=$(echo "$reorder_stats"  | jq '.reorder.gap_overflow_count // 0'      2>/dev/null || echo 0)
 
-echo "INFO: reorder stats — gap_filled=$gap_filled gap_timeout=$gap_timeout delivered=$delivered ack_demote=$ack_demote"
+echo "INFO: reorder stats — gap_filled=$gap_filled gap_timeout=$gap_timeout delivered=$delivered ack_demote=$ack_demote too_late=$too_late too_far_ahead=$too_far_ahead gap_overflow=$gap_overflow added_latency_max_ms=$lat_max_ms"
 # ack_demote not asserted: the iperf3 -u workload is one-directional (client->
 # server data, all large packets), so there is no small-packet ACK/return
 # direction for the classifier to demote. ACK-direction demotion needs a
@@ -262,28 +300,68 @@ if [ "$WORKLOAD_KIND" = "iperf3" ]; then
         fail=1
     fi
     # Stronger evidence: the engine did not just activate, it actually RE-ORDERED.
-    # MaxWaitMs=60 > the 40ms path-B spread, so the late packet arrives inside the
-    # wait window and the buffered gap fills. gap_filled>0 proves real in-tunnel
-    # order correction (the feature delivering value), not merely detection.
-    if [ "${gap_filled:-0}" -gt 0 ]; then
-        echo "PASS: reorder engine corrected ordering in-tunnel (gap_filled=$gap_filled)"
+    # added_latency_max_ms is the longest any delivered packet sat in the buffer.
+    # Held for path B and released by its arrival, a packet sits about the path
+    # spread (~39ms measured), so "spread/2 <= max" says packets really were
+    # held for the slow path. The upper bound is the algorithm's: the gap timer
+    # follows PDCP t-Reordering (a reordering mark is taken when the timer
+    # starts; a gap that opens during a wait is deferred to the next one), so a
+    # datagram is held nominally at most 2 x MaxWaitMs, plus a few ms of tick
+    # slack. That bound holds whether or not a timeout fired — a packet can be
+    # deferred once by a cohort that then FILLS just before its deadline, so
+    # gap_timeout == 0 does not imply max < MaxWaitMs. "wait < spread" is NOT
+    # caught here (MaxWaitMs=30 measures ~40ms and passes); the too_late check
+    # below is that detector now.
+    #
+    # gap_filled_count is deliberately NOT asserted: a period ends as "filled"
+    # when its cohort (the gaps present when the timer started) is complete, so
+    # under continuous striping gap_count tracks run-time / spread and the
+    # filled/timeout split measures the scheduler's burstiness, not correctness.
+    lat_lo_ms=$((PATH_B_DELAY_MS / 2))
+    lat_hi_ms=$((MAX_WAIT_MS * 2 + 5))
+    if awk -v v="$lat_max_ms" -v lo="$lat_lo_ms" -v hi="$lat_hi_ms" \
+            'BEGIN { exit !(v >= lo && v <= hi) }'; then
+        echo "PASS: buffered packets were held for the slow path" \
+             "(added_latency_max_ms=$lat_max_ms in [$lat_lo_ms, $lat_hi_ms]; 2xMaxWaitMs + 5ms slack, gap_timeout=$gap_timeout)"
     else
-        echo "FAIL: no gaps filled (gap_filled=$gap_filled) despite MaxWaitMs(60) >"
-        echo "      path-B spread(40ms) — late packets should arrive within the wait."
+        echo "FAIL: added_latency_max_ms=$lat_max_ms not in [$lat_lo_ms, $lat_hi_ms] (gap_timeout=$gap_timeout) —" \
+             "below: nothing waited for path B; above: a hold exceeded 2xMaxWaitMs."
+        echo "      raw=$reorder_stats"
+        fail=1
+    fi
+    # Holding packets must not turn arrivals into loss. A gap present when the
+    # timer starts is never skipped before MaxWaitMs, so on this topology
+    # (spread ~39ms < MaxWaitMs=60) too_late is expected to be ~0 — the old
+    # anchored timer measured ~0.8% here. 0.1% covers start/stop transients.
+    # This is also the "wait < spread" detector: with MaxWaitMs=30 a large share
+    # of path-B packets arrive after their wait expired and fail here.
+    if [ "$((too_late * 1000))" -le "$delivered" ]; then
+        echo "PASS: too-late drops within 0.1% of delivered (too_late=$too_late delivered=$delivered)"
+    else
+        echo "FAIL: too-late drops exceed 0.1% of delivered (too_late=$too_late delivered=$delivered)"
+        echo "      raw=$reorder_stats"
+        fail=1
+    fi
+    # A held gap pins `expected`: arrivals beyond the cap window are dropped as
+    # too_far_ahead and arrivals beyond the per-flow byte limit force an
+    # overflow flush. At 20M (~1.7k pps) neither bound is reachable; record
+    # both and fail on far-ahead drops.
+    if [ "${too_far_ahead:-0}" -eq 0 ]; then
+        echo "PASS: no far-ahead drops (too_far_ahead=0 gap_overflow=$gap_overflow)"
+    else
+        echo "FAIL: too_far_ahead=$too_far_ahead at 20M — a hold exceeded the cap window" \
+             "(gap_overflow=$gap_overflow)"
         echo "      raw=$reorder_stats"
         fail=1
     fi
 else
-    echo "SKIP: engine-fired/filled checks need iperf3; ping fallback is too low-rate"
-    echo "      to guarantee reordering. gap_count=$gap_count gap_filled=$gap_filled (info)."
+    echo "SKIP: engine-fired/re-ordered checks need iperf3; ping fallback is too low-rate"
+    echo "      to guarantee reordering. gap_count=$gap_count added_latency_max_ms=$lat_max_ms (info)."
 fi
 
-# Non-fatal breakdown for the human reading the run. Whether a gap closes by
-# the missing seq arriving (gap_filled) vs the wait expiring (gap_timeout)
-# depends on the 40ms path-B one-way delay vs the 30ms default max_wait_ms —
-# either outcome still counts toward gap_count, which is why the hard assertion
-# is on gap_count, not gap_filled. Narrow path B below max_wait (e.g. 20ms) if
-# you want to bias toward gap_filled.
+# Non-fatal breakdown for the human reading the run. How periods split between
+# gap_filled and gap_timeout depends on how continuously the scheduler uses
+# path B (see the note above), so neither is asserted.
 echo "INFO: reorder breakdown — gap_filled=$gap_filled gap_timeout=$gap_timeout delivered=$delivered"
 
 # ACK demotion is intentionally NOT asserted here. iperf3 -u is a one-directional
@@ -325,6 +403,34 @@ else
     echo "FAIL: inner UDP workload failed with reorder OFF"
     fail=1
 fi
+ooo_off="$WORKLOAD_OOO"
+pkts_off="$WORKLOAD_PKTS"
+
+# The end-to-end point of the feature: what ordering does the INNER receiver
+# see? Same topology and workload in both runs, so the OFF run is the control —
+# it must show reordering (otherwise the paths did not reorder and the ON
+# result proves nothing), and the ON run must have removed it.
+echo "INFO: inner receiver out-of-order — ON=${ooo_on:-?}/${pkts_on:-?} OFF=${ooo_off:-?}/${pkts_off:-?}"
+if [ -n "$ooo_on" ] && [ -n "$ooo_off" ]; then
+    if [ "$ooo_off" -gt 0 ]; then
+        echo "PASS: paths reorder the inner flow without the shim (OFF out_of_order=$ooo_off)"
+    else
+        echo "FAIL: no reordering with reorder OFF (out_of_order=$ooo_off) — the control"
+        echo "      run shows nothing for the shim to fix; was the flow striped?"
+        fail=1
+    fi
+    if [ "$ooo_on" -eq 0 ]; then
+        echo "PASS: inner receiver saw an in-order stream with reorder ON (out_of_order=0)"
+    else
+        echo "FAIL: inner receiver saw out_of_order=$ooo_on with reorder ON (OFF=$ooo_off)"
+        fail=1
+    fi
+elif [ "$WORKLOAD_KIND" = "iperf3" ]; then
+    echo "FAIL: iperf3 ran but its server report was unreadable (ON='$ooo_on' OFF='$ooo_off')"
+    fail=1
+else
+    echo "SKIP: in-order check needs iperf3; ping fallback reports no ordering."
+fi
 
 # Behavioral MTU check: reorder ON inner MTU should be exactly 8 (the wire
 # header, MQVPN_REORDER_HDR_LEN) less than the reorder-OFF inner MTU. Only
@@ -343,6 +449,40 @@ else
     echo "WARN: skipping MTU -8 check (ON='$mtu_on' OFF='$mtu_off' — one not parsed)"
 fi
 
+# ─── Phase D: client reorder ON, server OFF (not negotiated) ──────────────
+bench_stop_vpn
+echo ""
+echo "=== Phase D: client reorder ON, server reorder OFF ==="
+reorder_run "$INI_ON" "$SERVER_LOG_MIX" "$CLIENT_LOG_MIX" "$INI_OFF"
+
+if ip netns exec "$NS_CLIENT" ping -c 3 -W 2 "$TUNNEL_SERVER_IP" >/dev/null 2>&1; then
+    echo "PASS: tunnel established (client ON, server OFF)"
+else
+    echo "FAIL: tunnel did not establish with client ON, server OFF"
+    fail=1
+fi
+
+if grep -q "peer advertised mqvpn-reorder" "$CLIENT_LOG_MIX"; then
+    echo "FAIL: client saw a reorder echo from a server with reorder OFF"
+    fail=1
+else
+    echo "PASS: not negotiated (server has reorder OFF)"
+fi
+
+# Nothing is stamped without the server's echo, so no header to make room for.
+mtu_mix="$(extract_client_mtu "$CLIENT_LOG_MIX")"
+if [ -n "$mtu_mix" ] && [ -n "$mtu_off" ]; then
+    if [ "$mtu_mix" -eq "$mtu_off" ]; then
+        echo "PASS: no reorder MTU overhead without negotiation (MIX=$mtu_mix == OFF=$mtu_off)"
+    else
+        echo "FAIL: client lost $((mtu_off - mtu_mix)) bytes of MTU without negotiating reorder" \
+             "(MIX=$mtu_mix, OFF=$mtu_off)"
+        fail=1
+    fi
+else
+    echo "WARN: skipping the Phase D MTU check (MIX='$mtu_mix' OFF='$mtu_off' — one not parsed)"
+fi
+
 # ─── Verdict ───────────────────────────────────────────────────────────────
 echo ""
 if [ "$fail" -ne 0 ]; then
@@ -351,6 +491,7 @@ if [ "$fail" -ne 0 ]; then
     echo "--- Client log ON (last 25) ---";  tail -25 "$CLIENT_LOG"
     echo "--- Server log OFF (last 15) ---"; tail -15 "$SERVER_LOG_OFF"
     echo "--- Client log OFF (last 15) ---"; tail -15 "$CLIENT_LOG_OFF"
+    echo "--- Client log MIX (last 15) ---"; tail -15 "$CLIENT_LOG_MIX"
     exit 1
 fi
 echo "RESULT: PASS"

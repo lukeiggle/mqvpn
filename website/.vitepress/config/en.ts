@@ -12,7 +12,7 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
     ],
 
     footer: {
-      message: 'Released under the Apache License 2.0',
+      message: 'Released under the Apache License 2.0 · <a href="/privacy">Privacy Policy</a>',
       copyright: 'Provided "AS IS" without warranty of any kind. Use at your own risk.',
     },
 
@@ -35,6 +35,7 @@ export const en: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
             { text: 'Building', link: '/guide/building' },
             { text: 'Configuration', link: '/guide/configuration' },
             { text: 'Multipath', link: '/guide/multipath' },
+            { text: 'Hybrid Mode', link: '/guide/hybrid-mode' },
             { text: 'Architecture', link: '/guide/architecture' },
           ],
         },

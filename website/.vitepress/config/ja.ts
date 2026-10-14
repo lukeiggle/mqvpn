@@ -12,7 +12,7 @@ export const ja: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
     ],
 
     footer: {
-      message: 'Apache License 2.0 に基づき公開',
+      message: 'Apache License 2.0 に基づき公開 · <a href="/ja/privacy">プライバシーポリシー</a>',
       copyright: '本ソフトウェアは現状有姿（AS IS）で提供され、いかなる保証も行いません。利用は自己責任で行ってください。',
     },
 
@@ -35,6 +35,7 @@ export const ja: LocaleSpecificConfig<DefaultTheme.Config> & { label: string; la
             { text: 'ビルド', link: '/ja/guide/building' },
             { text: '設定', link: '/ja/guide/configuration' },
             { text: 'マルチパス', link: '/ja/guide/multipath' },
+            { text: 'ハイブリッドモード', link: '/ja/guide/hybrid-mode' },
             { text: 'アーキテクチャ', link: '/ja/guide/architecture' },
           ],
         },

@@ -211,6 +211,8 @@ datagram counters and uptime.
   "pkts_lane_raw":0,"pkts_lane_tcp_dropped":0,
   "tcp_flows_active":1,"tcp_flows_total":7,
   "tcp_flows_rejected":2,"raw_markers_active":0,
+  "udp_tx_sends":54120,"udp_tx_datagrams":889304,
+  "udp_rx_receives":812004,"udp_rx_datagrams":1031887,
   "uptime_sec":3601
 }
 ```
@@ -232,6 +234,10 @@ datagram counters and uptime.
 | `tcp_flows_total`    | uint64 | Hybrid mode: cumulative TCP-lane flows opened since start (never decrements). Client: SYNs the flow table admitted. Server: egress flows admitted. |
 | `tcp_flows_rejected` | uint64 | Hybrid mode: cumulative flows refused by a cap. Client: SYNs rejected pre-lwIP (flow-table cap or alloc failure). Server: cap-503 rejections (whole-server fd-budget cap + per-session `TcpMaxFlows` cap; ACL 403s and 5xx syscall failures are not caps and are not counted). |
 | `raw_markers_active` | uint64 | Hybrid mode: sticky-RAW markers currently held in the client's TCP-lane flow table (5-tuples pinned to RAW under `tcp=auto`). Client-only; always 0 server-side. |
+| `udp_tx_sends` | uint64 | Outer-UDP send syscalls that placed at least one datagram on the wire. |
+| `udp_tx_datagrams` | uint64 | Outer-UDP datagrams the kernel accepted. `udp_tx_datagrams / udp_tx_sends` is the achieved transmit batching factor; 1.0 means every datagram cost its own syscall. Exactly 1.0 with `UdpGso = false` and on platforms without the batched send path. |
+| `udp_rx_receives` | uint64 | Outer-UDP receive syscalls that returned data. |
+| `udp_rx_datagrams` | uint64 | Outer-UDP datagrams delivered to the library. `udp_rx_datagrams / udp_rx_receives` is the achieved receive coalescing factor. Exactly 1.0 with `UdpGro = false`; it also stays near 1.0 when the peer is not batching its sends, since the kernel then has nothing to coalesce, and over a loopback/veth path regardless of the peer. |
 | `uptime_sec` | uint64  | Seconds since `mqvpn_server_create` was called                 |
 
 Notes:
@@ -280,16 +286,17 @@ Return per-client and per-path detail for all currently connected clients.
   "n_clients":1,
   "clients":[
     {
-      "user":"alice","endpoint":"1.2.3.4:443",
+      "user":"alice","endpoint":"1.2.3.4:443","scheduler":"wlb",
       "connected_sec":42,
       "bytes_tx":1000,"bytes_rx":2000,
-      "paths":[
+      "n_paths":1,"paths":[
         {
           "path_id":0,"srtt_ms":31,"min_rtt_ms":18,
           "cwnd":196608,"in_flight":1024,
           "bytes_tx":900,"bytes_rx":1900,
           "pkt_sent":50,"pkt_recv":49,"pkt_lost":1,
-          "state":2,"state_label":"active"
+          "state":2,"state_label":"active",
+          "reinject_tx_bytes":0
         }
       ]
     }
@@ -310,9 +317,11 @@ Return per-client and per-path detail for all currently connected clients.
 |-----------------|--------|----------------------------------------------------|
 | `user`          | string | Username                                           |
 | `endpoint`      | string | Client's remote address and port (`ip:port`)       |
+| `scheduler`     | string | Scheduler this client's connection uses for the server-to-client direction. Equals the server default unless the client asked for another one, `AllowClientScheduler` is on, and none of the exceptions in the configuration guide applied. Added in v0.18.0. |
 | `connected_sec` | uint64 | Seconds since the session was established          |
 | `bytes_tx`      | uint64 | TUN bytes sent to this client                      |
 | `bytes_rx`      | uint64 | TUN bytes received from this client                |
+| `n_paths`       | int    | Number of entries in `paths`                       |
 | `paths`         | array  | Per-path objects (see below)                       |
 
 **Path object**
@@ -331,6 +340,7 @@ Return per-client and per-path detail for all currently connected clients.
 | `pkt_lost`     | uint64 | QUIC packets declared lost on this path                                                                            |
 | `state`        | uint   | xquic transport path state (numeric). **Legacy** — prefer `state_label` for new code; the numeric value is the raw `xqc_path_state_t` and may shift if xquic re-orders the enum. |
 | `state_label`  | string | Stable label for the state — one of `init`, `validating`, `active`, `closing`, `closed`, `unknown`. Added in v0.5.0. |
+| `reinject_tx_bytes` | uint64 | Cumulative bytes speculatively duplicated onto this path by reinjection (`[Multipath] Reinjection`; see README). 0 when reinjection is `off` (the default). Added in v0.15.0. |
 
 > **Note on `state`:** the numeric value is the raw xquic transport-layer path
 > state, **not** the mqvpn scheduler's logical role (primary / standby / etc.).
@@ -359,7 +369,7 @@ support was compiled in.
 | Field        | Type    | Description                                                    |
 |--------------|---------|----------------------------------------------------------------|
 | `version`    | string  | Version string from `mqvpn_version_string()`                   |
-| `scheduler`  | string  | Active multipath scheduler: `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`, or `unknown` |
+| `scheduler`  | string  | Server default scheduler (`Scheduler`); per-client values are in `get_status`. One of `minrtt`, `wlb`, `wlb_udp_pin`, `backup_fec`, or `unknown` |
 | `fec_enabled`| integer | `1` if built with `XQC_ENABLE_FEC`; `0` otherwise             |
 
 ---
@@ -519,6 +529,27 @@ mqvpn follows semantic versioning for the control API:
   struct producers write `sizeof(mqvpn_stats_t)` bytes, so binaries linked
   against the shared library must be recompiled against the new header. The
   shared-library SOVERSION was bumped 1 → 2 for exactly this reason.
+- `get_stats` was extended in v0.16.0 with the outer-UDP offload counters
+  `udp_tx_sends`, `udp_tx_datagrams`, `udp_rx_receives`, and
+  `udp_rx_datagrams`. Existing JSON consumers remain unaffected. The two
+  transmit-side fields also grow `mqvpn_stats_t`, so the same C-API caveat as
+  the v0.9.0 entry above applies: `mqvpn_client_get_stats` /
+  `mqvpn_server_get_stats` write `sizeof(mqvpn_stats_t)` bytes without
+  consulting the caller's `struct_size`, so binaries linked against the shared
+  library must be recompiled against the new header — the shared-library
+  SOVERSION was bumped 2 → 3 for exactly this reason.
+  The receive-side pair is deliberately NOT in `mqvpn_stats_t`:
+  UDP GRO is configured and un-coalesced entirely in the platform layer, which
+  the library never observes, so those two are read straight from the platform
+  by the control socket (`ctrl_socket_create`) instead.
+- `get_status` client objects gained `scheduler` in v0.18.0 (JSON only; the C
+  struct `mqvpn_client_info_t` is unchanged). Additive; existing JSON
+  consumers remain unaffected.
+- `get_status` path objects gained `reinject_tx_bytes` in v0.15.0 — the
+  per-path bytes speculatively duplicated by reinjection. Additive; existing
+  JSON consumers remain unaffected. The value is read from the server's
+  internal reinjection snapshot, not `mqvpn_path_stats_t`, so there is no
+  C-API struct growth and no recompile caveat.
 - `get_status` paths gained a `state_label` string in v0.5.0 alongside the
   existing numeric `state`; `get_fec_stats` gained `mp_state_label` similarly.
   Consumers that only read the numeric fields remain unaffected, but new code
@@ -578,7 +609,7 @@ keys are the snake_case column below.
 |-------------------------|---------------------------|---------|---------|----------------|-------------|
 | `Enabled`               | `enabled`                 | bool    | `false` | client + server | Turn hybrid mode on. Disabled by default — existing deployments see no behavior change. |
 | `Tcp`                   | `tcp`                     | string  | `auto`  | client only     | Per-flow TCP lane policy: `stream` (always relay via the TCP lane), `raw` (never — inner TCP stays on the CONNECT-IP datagram path, byte-identical to hybrid disabled), or `auto` (per-flow: TCP lane once ≥2 paths are active at SYN time, RAW otherwise; the decision is latched for the flow's lifetime, never re-evaluated). |
-| `TcpMaxFlows`           | `tcp_max_flows`           | uint32  | `256`   | client + server | Cap on concurrently open TCP-lane flows. Client: caps the local flow table (a SYN over the cap falls back to RAW pre-lwIP, counted in `tcp_flows_rejected`). Server: caps concurrent egress flows per client session (a SYN over the cap gets an HTTP `503`). |
+| `TcpMaxFlows`           | `tcp_max_flows`           | uint32  | `256`   | client + server | Cap on concurrently open TCP-lane flows. Client: caps the local flow table (a SYN over the cap falls back to RAW pre-lwIP, counted in `tcp_flows_rejected`). Server: caps concurrent egress flows per client session (a SYN over the cap gets an HTTP `503`). On the client the honored value is additionally clamped to half the build profile's lwIP pcb pool — 4096 on desktop/router, 256 on Android, 64 on iOS — and the clamp is logged at startup and at lane creation. Raising it for a router deployment needs the matching raise on the **server** too, since the per-session cap here is enforced independently on each side. |
 | `TcpIdleTimeoutSec`     | `tcp_idle_timeout_sec`    | uint32  | `300`   | client + server | Idle-eviction timeout for TCP-lane flows (no activity for this long tears the flow down). `0` disables idle eviction (flows live for the whole connection lifetime). |
 | `TcpConnectTimeoutSec`  | `tcp_connect_timeout_sec` | uint32  | `10`    | server only     | Timeout for the server's egress `connect()` to the requested target; on expiry the client gets an HTTP `504`. |
 | `TcpMaxGlobalFlows`     | `tcp_max_global_flows`    | uint32  | `4096`  | server only     | Whole-server cap on concurrent egress TCP flows, across all client sessions (independent of the per-session `TcpMaxFlows`). A SYN over the cap gets an HTTP `503`. |

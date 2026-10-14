@@ -1,25 +1,64 @@
 <div align="center">
-  <img src="website/public/img/mqvpn-lockup-violet-light.svg" alt="mqvpn" width="400">
+  <h1>
+    <picture>
+      <source
+        media="(prefers-color-scheme: dark)"
+        srcset="website/public/img/mqvpn-lockup-violet-dark.svg">
+      <img
+        src="website/public/img/mqvpn-lockup-violet-light.svg"
+        alt="mqvpn"
+        width="400">
+    </picture>
+  </h1>
+
   <p><b>All your connections. One stronger connection.</b></p>
+
+  <p>
+    <a href="https://docs.mqvpn.org/">Documentation</a> |
+    <a href="https://discord.gg/5rsqnZfBqu">Discord community</a>
+  </p>
+
+  <p>
+    <a href="https://play.google.com/store/apps/details?id=org.mqvpn.app">
+      <img
+        src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png"
+        alt="Get it on Google Play"
+        height="80">
+    </a>
+    <a href="https://f-droid.org/packages/org.mqvpn.app/">
+      <img
+        src="https://fdroid.gitlab.io/artwork/badge/get-it-on.png"
+        alt="Get it on F-Droid"
+        height="80">
+    </a>
+  </p>
 </div>
 
 mqvpn is an open-source VPN that combines multiple internet connections—such as Wi-Fi, cellular, Starlink, and multiple ISPs—for bandwidth aggregation and seamless failover.
 
+Example: an 8 Mbps SRT live stream over two 6 Mbit uplinks — a single connection (left) vs the same two connections bonded by mqvpn (right):
+
+https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5
+
 ## Table of Contents
 
 <!--toc:start-->
+- [Supported Platforms](#supported-platforms)
 - [Features](#features)
+- [Key Use Cases](#key-use-cases)
 - [Installation](#installation)
   - [Server](#server)
   - [Client (deb package)](#client-deb-package)
   - [Windows client](#windows-client)
   - [macOS client](#macos-client)
+  - [Verifying downloads](#verifying-downloads)
 - [Quick Start](#quick-start)
 - [Configuration](#configuration)
   - [INI config](#ini-config)
   - [JSON config](#json-config)
 - [Schedulers](#schedulers)
 - [Reorder buffer (datagram lane)](#reorder-buffer-datagram-lane)
+- [Reinjection (speculative duplication)](#reinjection-speculative-duplication)
 - [Hybrid mode (TCP lane)](#hybrid-mode-tcp-lane)
 - [systemd](#systemd)
 - [Control API](#control-api)
@@ -38,15 +77,46 @@ mqvpn is an open-source VPN that combines multiple internet connections—such a
 - [Acknowledgments](#acknowledgments)
 <!--toc:end-->
 
+## Supported Platforms
+
+**Server**
+
+| Platform | Minimum version | Status | Notes |
+|---|---|---:|---|
+| [Ubuntu/Debian (amd64/arm64)](#server) | Ubuntu 22.04 / Debian 12 | ✅ | amd64 Recommended |
+| Windows | — | — | Not supported |
+| macOS | — | — | Not supported |
+
+**Client**
+
+| Platform | Minimum version | CLI | GUI/App | Distribution |
+|---|---|---:|---:|---:|
+| [Ubuntu/Debian (amd64/arm64)](#client-deb-package) | Ubuntu 22.04 / Debian 12 | ✅ | 📋 | Release package |
+| [Arch Linux (amd64/arm64)](https://aur.archlinux.org/packages/mqvpn) | rolling | ✅ | 📋 | AUR |
+| [Windows (amd64/arm64)](#windows-client) | Windows 10 | ✅ | 📋 | Release archive |
+| [macOS arm64](https://github.com/mp0rta/homebrew-tap#install) | macOS 14 (Sonoma) | ✅ | 📋 | Homebrew / Release archive |
+| iOS | iOS 15 | — | 🚧 | App Store planned |
+| [Android](https://f-droid.org/packages/org.mqvpn.app/) | Android 8.0 (API 26) | — | 🧪 | F-Droid / APK / Play Store |
+
+> ✅ Supported · 🧪 Experimental · 🚧 In development · 📋 Planned
+
 ## Features
 
 - **Multipath** — Bind multiple interfaces (WiFi + LTE, dual ISP). Seamless failover and bandwidth aggregation via WLB scheduler.
-- **Standards-based** — MASQUE CONNECT-IP (RFC 9484), no proprietary tunnel format.
+- **Standards-based** — the tunnel is MASQUE CONNECT-IP (RFC 9484) over Multipath QUIC. Optional extensions (hybrid TCP lane, reorder) are negotiated in-band; the wire stays standard when they are off.
 - **Dual-stack** — IPv4 + IPv6 inside the tunnel.
 - **Multi-Platform** — Available on Linux (server/client), Windows (client only), macOS (client only) and Android (client only) support.
 - **PSK auth** — Pre-shared key over TLS 1.3.
 - **DNS override** — Prevents DNS leaks. Uses `resolvectl` on systemd-resolved systems, falls back to resolv.conf.
 
+
+## Key Use Cases
+
+**Stream bonding** — live feeds (SRT, RTMP) where a single connection does not provide sufficient bandwidth. The video at the top of this page shows an 8 Mbps SRT stream carried over two 6 Mbit uplinks; details in [Benchmarks](#benchmarks). RTMP, which cannot bond links on its own, bonds transparently through the tunnel — see [RTMP live streaming](#rtmp-live-streaming).
+
+**Boosting general-purpose transfer** — not just video: bonding speeds up everyday traffic too. UDP and any other traffic is aggregated across paths over the datagram lane, and with [hybrid mode](#hybrid-mode-tcp-lane) TCP is aggregated as well — even a single TCP connection can use multiple paths at once. Details in [Benchmarks](#benchmarks).
+
+**Staying connected on unreliable links** — when one connection drops or degrades (moving vehicles, congested Wi-Fi, cellular dead spots), traffic continues over the remaining paths without interrupting sessions.
 
 ## Installation
 
@@ -63,7 +133,7 @@ curl -fsSL https://github.com/mp0rta/mqvpn/releases/latest/download/install.sh \
     | sudo bash -s -- --start
 ```
 
-> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`.
+> **Note:** The self-signed certificate requires `--insecure` on the client. For production, replace with a trusted certificate (e.g. Let's Encrypt) and omit `--insecure`. Point `--cert` (or `Cert` / `cert_file` in a config file) at the full chain file (for Let's Encrypt, `fullchain.pem`): clients do not fetch missing intermediates.
 
 Options can be combined:
 
@@ -95,6 +165,18 @@ Pre-built binaries are shipped for Windows amd64 and arm64. Download `mqvpn_<VER
 ### macOS client
 
 Pre-built binaries are shipped for Apple silicon (arm64). Download `mqvpn_<VERSION>_darwin_arm64.tar.gz` from [Releases](https://github.com/mp0rta/mqvpn/releases/latest), extract, and follow the bundled `README.txt` (sudo required).
+
+### Verifying downloads
+
+Release artifacts carry [build provenance attestations](https://docs.github.com/en/actions/security-for-github-actions/using-artifact-attestations)
+signed via Sigstore. To verify a download was built by this repository's
+release workflow:
+
+```bash
+gh attestation verify mqvpn_<VERSION>_<ARCH>.deb --owner mp0rta
+```
+
+A `SHA256SUMS` file is also attached to each release.
 
 ## Quick Start
 
@@ -143,6 +225,12 @@ User = bob:bob-secret
 [Multipath]
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
+
+[Hybrid]
+Enabled = true
+
+[Reorder]
+Enabled = on
 ```
 
 ```ini
@@ -163,6 +251,12 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none, default: bbr2)
 Path = eth0
 Path = wlan0
+
+# [Hybrid]                      # opt in to carry inner TCP over QUIC streams; see the [Hybrid] section
+# Enabled = true
+
+# [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
+# Enabled = on
 ```
 
 ### JSON config
@@ -186,7 +280,9 @@ Server example:
     ],
     "max_clients": 64,
     "scheduler": "wlb",
-    "cc": "bbr2"
+    "cc": "bbr2",
+    "hybrid": { "enabled": true },
+    "reorder": { "enabled": "on" }
 }
 ```
 
@@ -266,7 +362,7 @@ it) and a no-op when either side has it off.
 ```ini
 [Reorder]
 Enabled = on
-MaxWaitMs = 50           # reorder window: hold out-of-order datagrams up to this long
+MaxWaitMs = 50           # wait for a missing datagram this long (hold nominally <= 2x)
 CapPackets = 1024        # per-flow buffer cap (packets)
 
 # Optional: target specific inner flows with a tuned preset
@@ -280,6 +376,30 @@ INI/JSON only (no CLI flag). Best on asymmetric-RTT path pairs (e.g. Wi-Fi +
 LTE); for symmetric, loss-dominated paths leave it off. See
 [docs/report/](docs/report/) for the parameter sweep and measured numbers.
 
+## Reinjection (speculative duplication)
+
+Sends copies of selected packets over a second link. This costs some extra
+bandwidth, and in return the tunnel rides out packet loss and sudden link
+trouble much more smoothly. Off by default. Sender-side only — each side's setting
+protects the traffic it *sends*, so set it on the **server** to protect
+download traffic (and on the client for upload). Requires multipath with two
+or more active paths — silently inactive with only one.
+
+```ini
+[Multipath]
+Reinjection = off                     # off (default) | deadline | idle | dgram
+ReinjectionSrttFactorPct = 110        # deadline mode: duplicate an unacked packet older than factor x min_srtt (100-1000; 110 = 1.1x)
+ReinjectionHardDeadlineMs = 500       # deadline mode: upper clamp (1-60000)
+ReinjectionDeadlineLowerBoundMs = 20  # deadline mode: lower clamp (1-60000; clamped down to the hard deadline if it would exceed it)
+```
+
+- `deadline` — insurance for bonded tunnels running the [hybrid TCP lane](#hybrid-mode-tcp-lane). Most of the time it does nothing and costs nothing. When a link suddenly goes bad, data already sent on it must be recovered before in-order delivery lets anything behind it through — even data that already arrived via the healthy link — which in bad cases stalls transfers for up to a second; `deadline` resends the late data on the healthy link right away, shrinking that stall to a barely noticeable blip. Protects stream (TCP-lane) traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged. Protects TCP/stream traffic only — with the hybrid lane disabled its effect is limited to control streams and a warning is logged.
+- `idle` — low-cost smoothing for interactive use (SSH, browsing): whenever the tunnel has nothing else to send, it uses that spare moment to send a copy of recent still-unconfirmed data over another link, shaving off occasional hiccups. No tuning needed.
+- `dgram` — for tunnels dedicated to real-time traffic (VoIP, gaming): every datagram-lane packet (UDP and other non-TCP traffic; hybrid-mode TCP is not duplicated) is sent over two links at once, so a lost packet or a dying link no longer causes dropouts or lag spikes. **Uses double the bandwidth for that traffic; not recommended for mixed tunnels** — it duplicates all inner UDP, including HTTP/3 video streams, so the usable speed of the datagram lane drops to a single link's capacity. Duplicates are delivered twice at the receiver's TUN unless the [reorder buffer](#reorder-buffer-datagram-lane) is enabled (it removes them); plain UDP apps may otherwise see duplicate packets.
+
+Per-path duplicated bytes are reported as `reinject_tx_bytes` in the control
+API `get_status` response.
+
 ## Hybrid mode (TCP lane)
 
 Optionally terminates inner TCP connections locally (embedded lwIP) and relays them over a dedicated HTTP/3 request stream instead of the datagram CONNECT-IP path — trades small per-flow overhead for multipath TCP aggregation (see docs/report/ for measured numbers).
@@ -290,7 +410,7 @@ TUN packet
   ▼
 classifier (per packet: protocol + Tcp mode + tunnel-subnet carve-out)
   │
-  ├─ IPv4 TCP, Tcp=stream (or Tcp=auto with ≥2 active paths)
+  ├─ TCP, Tcp=stream (or Tcp=auto with ≥2 active paths)
   │     └─▶ tcp lane (client-side lwIP) ─▶ HTTP/3 request stream ─▶ server egress connect()
   ├─ UDP (parseable)
   │     └─▶ datagram lane (existing reorder/STAMP path) ─▶ CONNECT-IP DATAGRAM
@@ -302,7 +422,7 @@ classifier (per packet: protocol + Tcp mode + tunnel-subnet carve-out)
 [Hybrid]
 Enabled = true
 Tcp = auto              # stream | raw | auto (per-flow: TCP lane once >=2 paths are active)
-TcpMaxFlows = 256        # concurrent TCP-lane flow cap (client) / per-session cap (server)
+TcpMaxFlows = 256        # concurrent TCP-lane flow cap (client, up to 4096) / per-session cap (server)
 EgressAllow = 10.0.5.0/24  # server: punch a hole through the default-deny egress ACL
 ```
 
@@ -452,6 +572,42 @@ Symmetric 2×100 Mbit / 25 ms, TCP uplink, `iperf3 -P {1,2,4,8,16}`, 3 reps. The
 
 Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_minrtt_1783350878.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_wlb_1783350878.png) — bench: [`benchmarks/bench_hybrid_scheduler.sh`](benchmarks/bench_hybrid_scheduler.sh) · data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
 
+**Asymmetric paths** — same bench on the asymmetric pair (A = 300 Mbit / 10 ms + B = 80 Mbit / 30 ms, 380 Mbps aggregate). Hybrid ON saturates the aggregate (**350–356 Mbps** ≈ 93 % at `-P ≥ 2`) here too, while raw multipath never fully recovers: the cross-path reorder penalty (20 ms vs 60 ms RTT legs) caps it at 330 Mbps even at 16 streams — so unlike the symmetric case, raw multipath needs many parallel streams to close the gap:
+
+| WLB, streams (`-P`) | 1 | 2 | 4 | 8 | 16 |
+|---|---|---|---|---|---|
+| hybrid OFF (raw) | 261 | 271 | 314 | 317 | 330 |
+| hybrid ON (lane) | **327** | 350 | 354 | 356 | 354 |
+| gain | **+26 %** | +29 % | +13 % | +12 % | +7 % |
+
+Charts: [MinRTT](bench_results/hybrid_mode/hybrid_mode_asym_minrtt_1785306660.png) · [WLB](bench_results/hybrid_mode/hybrid_mode_asym_wlb_1785306660.png) — data: [`bench_results/hybrid_mode/`](bench_results/hybrid_mode/)
+
+### SRT live streaming
+
+SRT contribution feeds over mqvpn, netns-emulated impaired links, mqvpn defaults (WLB, BBRv2) + SRT `lossmaxttl=32`. The starved-uplinks comparison video is shown at the top of this page; per-scenario results:
+
+| Scenario | Direct (single link) | mqvpn (2-path) |
+|---|---|---|
+| Starved uplinks (8 Mbps FHD over 2 × 6 Mbit) | VMAF 8.6, 1.2 s frozen | VMAF **87.7**, 0 s frozen |
+| Exceeds any single link (120 Mbps over 2 × 100 Mbit) | 31.5 % stream loss | **0.06 %** stream loss |
+| Dual cellular (42 Mbps over 40 + 30 Mbit lossy links) | 20–40 % stream loss | **0.9 %** stream loss |
+
+Full report: [`bench_results/srt/REPORT.md`](bench_results/srt/REPORT.md) — data & comparison videos: [`bench_results/srt/`](bench_results/srt/) — bench: [`scripts/benchmark_srt.sh`](scripts/benchmark_srt.sh)
+
+### RTMP live streaming
+
+RTMP runs over a single TCP connection and cannot bond links by itself (commercial bonding products work around this with proprietary protocols and cloud-side conversion). Through mqvpn's [hybrid TCP lane](#hybrid-mode-tcp-lane) it bonds transparently — the encoder and the streaming service stay unmodified. Below, one of two bonded links is cut for 30 seconds mid-stream: direct (left) stops for ~33 s, mqvpn (right) never stops:
+
+https://github.com/user-attachments/assets/04d3b4f9-be82-4a85-857d-474e503bfa94
+
+| Scenario | Direct (single link) | mqvpn (2-path) |
+|---|---|---|
+| Two weak uplinks (8 Mbps over 2 × 6 Mbit) | capped at 5.7 Mbps, drifts behind live | **7.8 Mbps, stays live** |
+| Bursty mobile-style loss | repeated disconnects, barely delivers | **stable, no disconnects** |
+| One link cut for 30 s | stream drops until the link returns | **keeps streaming** |
+
+Full report with all numbers: [`docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md`](docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — data & videos: [`bench_results/rtmp/`](bench_results/rtmp/) — bench: [`scripts/benchmark_rtmp.sh`](scripts/benchmark_rtmp.sh)
+
 ## Architecture
 
 ```
@@ -487,9 +643,12 @@ cd mqvpn
 
 ```bash
 # 1. Build BoringSSL
+# CMAKE_BUILD_TYPE is required — BoringSSL has no default build type, and
+# omitting it produces an unoptimized library (~21% less VPN throughput).
 cd third_party/xquic/third_party/boringssl
 mkdir -p build && cd build
-cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
+cmake -DBUILD_SHARED_LIBS=0 -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_C_FLAGS="-fPIC" -DCMAKE_CXX_FLAGS="-fPIC" ..
 make -j$(nproc) ssl crypto
 cd ../../../../..
 
@@ -591,7 +750,7 @@ mqvpn is designed to comply with the following RFCs as much as possible.
 
 ## Community
 
-Join the [mqvpn community on Zulip](https://mqvpn.zulipchat.com/) to ask questions, discuss use cases, share feedback, and contribute to the project.
+Welcome to join the [mqvpn community on Discord](https://discord.gg/5rsqnZfBqu) to ask questions, discuss use cases, share feedback, and contribute to the project. Contributions are welcome: see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Disclaimer
 
@@ -603,7 +762,7 @@ Use of mqvpn is at your own risk. Users are solely responsible for validating it
 
 If you need commercial support, integration consulting, managed deployments, or SLA inquiries, contact contact@mp0rta.dev.
 
-You can also contact via Zulip.
+You can also contact me via Discord.
 
 
 ## License
@@ -611,6 +770,9 @@ You can also contact via Zulip.
 Apache-2.0
 
 Copyright (c) 2026 mp0rta
+
+The "mqvpn" name and logo are not covered by the license — see
+[TRADEMARK.md](TRADEMARK.md).
 
 ## Acknowledgments
 

@@ -20,7 +20,12 @@
 #include <inttypes.h>
 #include <ctype.h>
 
-#define STATUS_BUF_SIZE 32768
+/* Read buffer for one control-API reply. It starts small and doubles up to
+ * STATUS_BUF_MAX: the server caps a reply at CTRL_MAX_RESP_BYTES (256 KiB,
+ * src/platform/linux/control_socket.h), and get_status reaches ~210 KB with
+ * MQVPN_MAX_USERS clients on MQVPN_MAX_PATHS paths each. */
+#define STATUS_BUF_INITIAL 32768
+#define STATUS_BUF_MAX     (1024 * 1024)
 
 /* JSON helpers (json_find_key, json_read_string, json_read_int64,
  * json_skip_ws) are provided by json_mini.h */
@@ -159,17 +164,17 @@ print_client(const char *obj)
             int64_t srtt = json_read_int64(json_find_key(path_obj, "srtt_ms"));
             int64_t min_rtt = json_read_int64(json_find_key(path_obj, "min_rtt_ms"));
             uint64_t cwnd = (uint64_t)json_read_int64(json_find_key(path_obj, "cwnd"));
-            int state = (int)json_read_int64(json_find_key(path_obj, "state"));
 
             char cwnd_str[16];
             format_size(cwnd, cwnd_str, sizeof(cwnd_str));
 
-            const char *state_str = "unknown";
-            switch (state) {
-            case 1: state_str = "active"; break;
-            case 3: state_str = "standby"; break;
-            case 4: state_str = "closed"; break;
-            }
+            /* The server names the state in "state_label" (control_socket.c,
+             * mqvpn_path_state_label); the numeric "state" is a raw xquic
+             * path_state whose values are not part of the control-API
+             * contract, so never map it here. */
+            char state_str[24] = "unknown";
+            const char *sl = json_find_key(path_obj, "state_label");
+            if (sl) json_read_string(sl, state_str, sizeof(state_str));
 
             printf("  path %d: srtt=%" PRId64 "ms min_rtt=%" PRId64 "ms cwnd=%s %s\n",
                    idx, srtt, min_rtt, cwnd_str, state_str);
@@ -241,12 +246,25 @@ ctrl_query(const char *addr, int port, const char *cmd)
 
     shutdown(fd, SHUT_WR);
 
-    /* Read response (handle EINTR) */
-    buf = malloc(STATUS_BUF_SIZE);
+    /* Read the response to EOF (handle EINTR), growing the buffer as needed:
+     * a reply cut at a fixed size would be parsed as a shorter, valid-looking
+     * client list. */
+    size_t cap = STATUS_BUF_INITIAL;
+    buf = malloc(cap);
     if (!buf) goto fail;
     size_t total = 0;
-    while (total < STATUS_BUF_SIZE - 1) {
-        ssize_t n = read(fd, buf + total, STATUS_BUF_SIZE - 1 - total);
+    for (;;) {
+        if (total == cap - 1) {
+            if (cap >= STATUS_BUF_MAX) {
+                fprintf(stderr, "error: response larger than %d bytes\n", STATUS_BUF_MAX);
+                goto fail;
+            }
+            char *nb = realloc(buf, cap * 2);
+            if (!nb) goto fail;
+            buf = nb;
+            cap *= 2;
+        }
+        ssize_t n = read(fd, buf + total, cap - 1 - total);
         if (n < 0) {
             if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
@@ -298,6 +316,34 @@ print_stats_summary(const char *buf)
            raw_markers);
 }
 
+/* ── Print the outer-UDP offload summary line ── */
+
+/* Separate line and separately gated: this answers a different question from
+ * the lane summary above, and a server can report either without the other
+ * (that one needs hybrid mode; these counters are unconditional on a server
+ * new enough to have them). Printed as a ratio because that is the form which
+ * answers the operator's actual question — whether the offload is batching —
+ * and which the startup "udp-gso:"/"udp-gro:" markers cannot, since those
+ * only report the kernel capability probe. x1.00 means every datagram cost
+ * its own syscall. */
+static void
+print_offload_summary(const char *buf)
+{
+    const char *ok = json_find_key(buf, "ok");
+    if (!ok || strncmp(ok, "true", 4) != 0) return;  /* older server / error */
+    if (!json_find_key(buf, "udp_tx_sends")) return; /* pre-offload server */
+
+    uint64_t tx_s = (uint64_t)json_read_int64(json_find_key(buf, "udp_tx_sends"));
+    uint64_t tx_d = (uint64_t)json_read_int64(json_find_key(buf, "udp_tx_datagrams"));
+    uint64_t rx_r = (uint64_t)json_read_int64(json_find_key(buf, "udp_rx_receives"));
+    uint64_t rx_d = (uint64_t)json_read_int64(json_find_key(buf, "udp_rx_datagrams"));
+
+    printf("server: udp tx=%" PRIu64 "/%" PRIu64 " (x%.2f) rx=%" PRIu64 "/%" PRIu64
+           " (x%.2f)\n",
+           tx_d, tx_s, tx_s ? (double)tx_d / (double)tx_s : 0.0, rx_d, rx_r,
+           rx_r ? (double)rx_d / (double)rx_r : 0.0);
+}
+
 /* ── Main entry point ── */
 
 int
@@ -312,6 +358,7 @@ run_status(const char *addr, int port)
     char *stats_buf = ctrl_query(addr, port, "{\"cmd\":\"get_stats\"}\n");
     if (!stats_buf) return 1; /* server unreachable — error already printed */
     print_stats_summary(stats_buf);
+    print_offload_summary(stats_buf);
     free(stats_buf);
 
     char *buf = ctrl_query(addr, port, "{\"cmd\":\"get_status\"}\n");

@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.Cable
 import androidx.compose.material.icons.filled.SignalCellularAlt
 import androidx.compose.material.icons.filled.Wifi
@@ -20,6 +21,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import com.mqvpn.sdk.core.model.PathInfo
 
@@ -31,15 +33,27 @@ private val PATH_STATUS_NAMES = mapOf(
     4 to "Closed",
 )
 
+fun pathStatusName(status: Int): String = PATH_STATUS_NAMES[status] ?: "Unknown"
+
+/** Port of iOS PathCardView.statusColor. */
+fun pathStatusColor(status: Int): Color = when (status) {
+    1 -> Color(0xFF4CAF50) // Active — green
+    0, 3 -> Color(0xFFFFC107) // Pending/Standby — yellow/amber
+    2 -> Color(0xFFFF9800) // Degraded — orange
+    4 -> Color.Gray // Closed
+    else -> Color(0xFFF44336) // Unknown — red
+}
+
 @Composable
 fun PathCard(path: PathInfo) {
     val icon = when {
         path.iface.startsWith("wifi") || path.iface.startsWith("wlan") -> Icons.Default.Wifi
         path.iface.startsWith("cellular") || path.iface.startsWith("rmnet") || path.iface.startsWith("ccmni") ->
             Icons.Default.SignalCellularAlt
+        path.iface.startsWith("bluetooth") -> Icons.Default.Bluetooth
         else -> Icons.Default.Cable
     }
-    val statusName = PATH_STATUS_NAMES[path.status] ?: "Unknown"
+    val statusName = pathStatusName(path.status)
 
     Card(
         modifier = Modifier

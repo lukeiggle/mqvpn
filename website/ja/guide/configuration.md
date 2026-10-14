@@ -26,7 +26,15 @@ User = bob:<BOB_PSK>
 [Multipath]
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+
+[Hybrid]
+Enabled = true
+
+[Reorder]
+Enabled = on
 ```
+
+CA が発行した証明書を使う場合、`Cert` (JSON では `cert_file`) にはサーバー証明書と中間証明書を連結した fullchain を指定します。Let's Encrypt では `cert.pem` ではなく `fullchain.pem` です。クライアントはサーバーが送った chain をそのまま検証し、足りない中間証明書を取りに行かないため、leaf だけのファイルでは、その中間証明書を元から信頼していないクライアントで検証に失敗します。
 
 ### クライアント
 
@@ -50,6 +58,12 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
 Path = wlan0
+
+# [Hybrid]                      # 内側 TCP を QUIC の stream で運ぶ。詳細は [Hybrid] の節
+# Enabled = true
+
+# [Reorder]                     # 内側 QUIC などの大きな転送向け。詳細は [Reorder] の節
+# Enabled = on
 ```
 
 ## JSON 形式
@@ -75,9 +89,13 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
   ],
   "max_clients": 64,
   "scheduler": "wlb",
-  "cc": "bbr2"
+  "cc": "bbr2",
+  "hybrid": { "enabled": true },
+  "reorder": { "enabled": "on" }
 }
 ```
+
+`cert_file` にも同じく fullchain を指定します (INI のサーバー例の下の注記を参照)。
 
 ### クライアント
 
@@ -102,7 +120,7 @@ JSON は構造化された設定管理や自動化ツールとの連携に便利
 
 ## マルチユーザー認証
 
-サーバーでは複数のユーザーをそれぞれ個別の PSK で認証できます。JSON config の `users` 配列で設定するか、[Control API](#control-api) を使って実行中にユーザーを管理できます。`users` 配列の各要素はオブジェクト形式（`{"name":"alice","key":"..."}`）または省略形の文字列（`"alice:key"`）のどちらでも指定可能です。
+サーバーでは複数のユーザーをそれぞれ個別の PSK で認証できます。JSON config では `users` 配列で設定します。各要素はオブジェクト形式（`{"name":"alice","key":"..."}`）または省略形の文字列（`"alice:key"`）のどちらでも指定可能です。INI config では `[Auth]` セクションに `User = NAME:KEY` 行を複数書きます。[Control API](#control-api) を使って実行中にユーザーを管理することもできます。
 
 `auth_key`（グローバルキー）と `users` を両方設定した場合、クライアントはどちらでも認証可能です。名前付きユーザーのみに制限するには、`auth_key` を設定から削除してください。
 
@@ -127,7 +145,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |------|------|-----------|
 | `Address` | サーバーアドレス（`HOST:PORT`、IPv6 は `[2001:db8::1]:443` 形式） | 必須 |
 | `ServerName` | TLS SNI および証明書検証名。IP 直接接続でドメイン証明書を検証する場合に使用 | Address のホスト部 |
-| `Insecure` | TLS 証明書検証をスキップ | `false` |
+| `Insecure` | TLS 証明書検証を省略する (自己署名のテスト構成のみ)。`false` ではシステムのストア (`/etc/ssl`。`SSL_CERT_FILE` / `SSL_CERT_DIR` で上書き可) で検証する。Linux/macOS (および custom trust path を使う Windows) では IP アドレス接続時に `ServerName` へ証明書の DNS 名を設定する。Windows の証明書ストアで検証する場合は IP literal が `iPAddress` SAN と直接照合される。Windows では Windows の証明書ストアで検証する。`SSL_CERT_FILE` (PEM バンドル) または `SSL_CERT_DIR` (ハッシュ化した証明書ディレクトリ) が設定されていれば、Linux と同様にそちらを使う。Android では端末の CA ストアとアプリの network security config で検証する。証明書が一致すべき名前は `tlsServerName` (`ServerName` の SDK 版) で、ブラケットなしのホスト名か IP リテラルを指定する。 | `false` |
 
 ### `[Interface]`
 
@@ -139,10 +157,17 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `TunName` | TUN デバイス名 | `mqvpn0` |
 | `DNS` | DNS サーバー（カンマ区切り） | — |
 | `LogLevel` | ログレベル（`debug`、`info`、`warn`、`error`） | `info` |
-| `KillSwitch` | VPN 外への通信を遮断（クライアントのみ） | `false` |
+| `KillSwitch` | VPN 外への通信を遮断（クライアントのみ）。特定のネットワークアダプタに bind するアプリケーションがトンネルを迂回するのも防ぐ | `false` |
 | `Reconnect` | 自動再接続を有効化（クライアントのみ） | `true` |
 | `ReconnectInterval` | 再接続の間隔（秒） | `5` |
+| `ManageRoutes` | ホストのルーティングテーブルを管理する（VPN ルートとサーバー pin ルート）。自前でルーティングを管理する場合は `false`（または `--no-manage-routes`）を指定。経路の設定だけでは、ソケットを特定のアダプタに bind するアプリケーションは止められない — 下の注記を参照 | `true` |
 | `MTU` | TUN MTU（1280–9000）。クライアント: 上限指定 — ネゴシエーション値のほうが小さい場合はそちらが使われる。サーバー: TUN MTU を直接設定。 | auto（クライアント ~1382 ネゴシエーション、サーバー 1382） |
+
+> **注記: 経路管理はアダプタに bind するアプリケーションをカバーしない**
+>
+> mqvpn はシステムのデフォルトルートを置き換えるのではなく、split default ルート（`0.0.0.0/1` + `128.0.0.0/1`）を追加します。元のデフォルトルートはそのまま残るため、宛先への経路ではなく*システムのデフォルトルート*を見てネットワークアダプタを選ぶアプリケーションは、物理アダプタを使い続けてトンネルを迂回します。Windows 版の Tailscale は自身のソケットに対してこの方式を取ります。
+>
+> これは `ManageRoutes` とは独立した挙動です。こうしたアプリケーションを止めるには `KillSwitch = true` を設定してください。その場合、**トンネル経由になるのではなく遮断される**点に注意してください。
 
 ### `[TLS]`（サーバーのみ）
 
@@ -159,15 +184,27 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `User` | ユーザー個別の PSK（`NAME:KEY` 形式、複数指定可） | — |
 | `MaxClients` | 最大同時接続クライアント数（サーバーのみ） | `64` |
 
+JSON ではクライアント・サーバーとも `auth_key` を使います（上の例のとおり）。
+
 ### `[Multipath]`
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
 | `Scheduler` | スケジューラアルゴリズム（`minrtt`, `wlb`, `wlb_udp_pin`, または `backup_fec`） | `wlb` |
+| `AllowClientScheduler` | サーバーのみ (JSON では `allow_client_scheduler`、コマンドラインでは `--allow-client-scheduler`)。`true` にすると、スケジューラを指定してきたクライアントには、そのクライアント自身の接続のダウンロード方向でそのスケジューラを使います。ほかのクライアントはサーバーの `Scheduler` のままです。クライアントが `backup_fec` を指定した場合、サーバーの `Scheduler` が `backup_fec` の場合、同じ接続ですでに一度スケジューラを変更した場合、接続がすでに複数のパスを使っている場合は、リクエストは適用されず、その接続は現在のスケジューラ（最初はサーバーの `Scheduler`）のままです。 | `false` |
+| `RequestServerScheduler` | クライアントのみ (JSON では `request_server_scheduler`、コマンドラインでは `--request-server-scheduler`)。`true` にすると、このクライアントの `Scheduler` をダウンロード方向にも使うようサーバーに依頼します。`Scheduler` だけを設定した場合は、従来どおりアップロード方向にのみ影響します。`AllowClientScheduler = true` のサーバーでのみ有効です。 | `false` |
 | `CC` | 輻輳制御アルゴリズム（`bbr2`, `bbr`, `cubic`, または `none`） | `bbr2` |
 | `Path` | バインドするネットワークインターフェース（複数指定可） | デフォルトインターフェース |
+| `InitMaxPathId` | MP-QUIC draft-21 テスト用ノブ: transport parameters で広告する初期 Maximum Path Identifier（`1`–`4294967295`、`0` = xquic デフォルト `8`） | `0` |
+| `Reinjection` | 投機的複製モード（`off`, `deadline`, `idle`, または `dgram`） | `off` |
+| `ReinjectionSrttFactorPct` | `deadline` モード: factor × min_srtt を超えた未 ACK パケットを複製、パーセント指定（`100`–`1000`） | `110` |
+| `ReinjectionHardDeadlineMs` | `deadline` モード: 複製デッドラインの上限クランプ（`1`–`60000`） | `500` |
+| `ReinjectionDeadlineLowerBoundMs` | `deadline` モード: 下限クランプ。上限を超える値は上限に切り詰め（`1`–`60000`） | `20` |
 
-スケジューラの詳細は[マルチパス](./multipath)を参照してください。
+このバージョンのサーバーは、`AllowClientScheduler` が `false` の場合でも、接続中の各クライアントに、そのクライアントに対して使っているスケジューラを通知します。`RequestServerScheduler` を設定したクライアントは、接続後に `server scheduler: <name> (requested <name>)` とログに出力します。
+
+スケジューラの詳細は[マルチパス](./multipath)、Reinjection のモード別ガイドは
+[マルチパスの Reinjection 節](./multipath)を参照してください。
 
 > `backup_fec` は実験的機能で、両ピアが mqvpn 0.4.0 以降かつ FEC ビルド
 > (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`) を有効にしている必要があります。
@@ -177,9 +214,9 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 ### `[Reorder]`
 
-内側 UDP トラフィック向けの、フロー単位の reorder バッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが受け取る順序の乱れを軽減します。デフォルトは無効（`Enabled = off`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。
+内側 UDP トラフィック向けの、フロー単位の reorder バッファです。mqvpn のマルチパス集約によって複数経路に分散される単一の内側コネクション（例: 内側 QUIC）を対象とし、順序が乱れたデータグラムを短時間だけ保持して順序どおりに配送することで、内側エンドポイントが受け取る順序の乱れを軽減します。デフォルトは無効（`Enabled = off`）で、無効時はこのセクションは効果を持たず、パケットはそのまま転送されます。サーバーとクライアントの両方で `Enabled = on` のときだけ有効になり、そのときクライアントのログに `peer advertised mqvpn-reorder` が出ます。
 
-> **対象範囲:** reorder バッファは現在 **内側 UDP フローのみ** に適用されます。**内側 TCP はまだ reorder バッファでは扱いません（TODO）。** 内側 TCP は代わりに、TCP フローを単一経路に固定するスケジューラのフローピン留め（`wlb` / `wlb_udp_pin`）と、TCP 自身の順序乱れ耐性（RACK/SACK）に依存します。
+> **対象範囲:** reorder バッファは **内側 UDP フローのみ** に適用されます。**内側 TCP は reorder バッファでは扱いません。** 内側 TCP は代わりに、後述する hybrid mode（[`[Hybrid]`](#hybrid)）を有効化してください。QUIC stream によって reordering されます。
 
 | キー | 説明 | デフォルト |
 |------|------|-----------|
@@ -199,7 +236,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 
 ACK 方向のデモートは自動です。ACK / 制御ストリームのように見える（ほとんどが小さいパケットの）フローはパススルーへ移され、遅延されることがなくなります。これは内部的な挙動であり設定可能なつまみではありません — `ClassifyWindow` / `AckDemoteMaxLarge` / `SmallPacketThreshold` を通じて間接的に調整します。
 
-reorder はスループットとレイテンシのトレードオフで、bulk 転送には効きますが、対象になるすべてのフローに最大 `MaxWaitMs` の遅延を上乗せします。1 本のトンネルは通常その両方のトラフィックを運ぶため、ポート単位の `[ReorderRule]` で、効く所（bulk な内側 QUIC）だけ有効にし、低遅延トラフィック（DNS, NTP, リアルタイム UDP）はパススルーさせられます。マッチしない UDP はデフォルトでパススルーなので、reorder したいポートだけルールを書けば済みます:
+reorder はスループットとレイテンシのトレードオフで、bulk 転送には効きますが、対象になるすべてのフローに遅延を上乗せします。`MaxWaitMs` は欠落データグラムをスキップするまで受信側が待つ時間で、待っている最中に新たに開いたギャップは次の待ちに回されるため、保持時間は名目上 `MaxWaitMs` の 2 倍までです（バッファ上限によるフラッシュで早く解放されることがあり、期限は定期的に確認されるため、少し超過することがあります）。順序どおりに届いたデータグラムは遅延しません。1 本のトンネルは通常その両方のトラフィックを運ぶため、ポート単位の `[ReorderRule]` で、効く所（bulk な内側 QUIC）だけ有効にし、低遅延トラフィック（DNS, NTP, リアルタイム UDP）はパススルーさせられます。マッチしない UDP はデフォルトでパススルーなので、reorder したいポートだけルールを書けば済みます:
 
 ```ini
 [Reorder]
@@ -216,7 +253,7 @@ Port = 53
 Profile = default_udp
 ```
 
-…または JSON でも同様に設定できます。`reorder` オブジェクトは上記 INI キーに 1:1 で対応する snake_case キーを使い、`reorder_rules` は `{proto, port, profile}` オブジェクトの配列です（各ルールには任意で `max_wait_ms` / `cap_packets` のオーバーライドを付けられます）:
+JSON でも同様に設定できます。`reorder` オブジェクトは上記 INI キーに 1:1 で対応する snake_case キーを使い、`reorder_rules` は `{proto, port, profile}` オブジェクトの配列です（各ルールには任意で `max_wait_ms` / `cap_packets` のオーバーライドを付けられます）:
 
 ```json
 {
@@ -280,9 +317,62 @@ reorder は**デフォルトで無効**であり、有効な範囲の中での�
 | `MaxWaitMs` | このルールのみの保持時間（ms）のオーバーライド。`0` は警告付きで拒否されます — ポートを素通しさせたい場合は代わりに `Profile = default_udp` を使ってください | プロファイルプリセット |
 | `CapPackets` | このルールのみのフローあたりバッファ上限のオーバーライド。0 以外の 2 のべき乗である必要があり、そうでなければ警告付きで拒否されます | プロファイルプリセット |
 
+### `[Hybrid]`
+
+内側 TCP をクライアントでローカル終端し、HTTP/3 リクエストストリームで中継することで、単一の TCP フローでも複数パスの帯域を集約できるようにします。デフォルト無効。レーン図・egress ACL の意味論・既知の制限は[ハイブリッドモード](./hybrid-mode)を参照してください。
+
+| キー | 説明 | 対象 | デフォルト |
+|------|------|------|-----------|
+| `Enabled` | マスタースイッチ | client + server | `false` |
+| `Tcp` | フロー単位の TCP レーンポリシー: `stream`（常に使用）、`raw`（不使用 — hybrid 無効時とバイト同一）、`auto`（SYN 時点でアクティブパスが 2 本以上なら TCP レーン。判定はフローの生存期間中固定） | client | `auto` |
+| `TcpMaxFlows` | 同時 TCP レーンフロー数の上限。**client と server で実装も失敗時の挙動も異なる** — 詳細はこの表の直下の **`TcpMaxFlows`の注意点** を参照 | client + server | `256` |
+| `TcpIdleTimeoutSec` | TCP レーンフローのアイドル破棄タイムアウト。`0` で無効化 | client + server | `300` |
+| `TcpConnectTimeoutSec` | サーバの egress `connect()` タイムアウト。超過時クライアントは HTTP `504` を受け取ります | server | `10` |
+| `TcpMaxGlobalFlows` | 全セッション合計の egress TCP フロー数のサーバ全体上限 | server | `4096` |
+| `EgressAllow` | プライベートレンジ向けデフォルト拒否 egress ACL を通す CIDR（繰り返し可、最大 32） | server | — |
+| `EgressDeny` | 追加で拒否する CIDR。`EgressAllow` の後に評価されます（繰り返し可、最大 32） | server | — |
+
+#### `TcpMaxFlows`の注意点
+`TcpMaxFlows` は client と server で挙動が異なります。
+共通しているのはキー名だけで、数える対象も、上限に当たったときの結果も別物になります。
+
+| | client | server |
+|---|---|---|
+| 数える場所 | レーン自身のフローテーブル | クライアントセッション単位 |
+| 判定タイミング | **lwIP が SYN を見る前** | CONNECT-TCP 要求の到着時 |
+| 内側 TCP の終端 | lwIP (レーン内) | しない (通常のカーネルソケットで中継) |
+| **上限超過時** | **RAW レーンに降格** — 接続は成立する (失敗ではない) | **HTTP `503`** → client はその内側コネクションを **RST**。この時点で RAW 降格はない |
+| per-flow メモリ | **~0.75 MiB** (uplink キューの上限) | **~32 KiB** (遅延確保の 16 KiB 中継バッファ × 2) + fd 1 本 |
+| 先に尽きる資源 | RAM — worst case は `TcpMaxFlows` × 0.75 MiB (既定 256 で約 192 MiB、4096 で約 3.0 GiB) | **fd 予算** — 全体上限の `TcpMaxGlobalFlows` が先に判定される。ただし RAM も見積もっておくこと: worst case は `TcpMaxGlobalFlows` × 32 KiB (4096 で約 128 MiB、全フローが両方向で一度ずつ pause した場合) |
+| 実効値の clamp | lwIP TCP pcb プールの**半分**まで (下記) | なし (lwIP を使わないため) |
+
+**client の clamp:** 実効値は lwIP TCP pcb プールの半分に制限されます。
+最大値は、desktop/router ビルド (Linux / Windows / macOS) で `4096`、Android で `256`、
+[iOS lwIP プロファイル](./hybrid-mode#ios-ビルド)で `64`になります。
+
+**これは設定値を半分にするものではありません。** 実効値ぶんのフローは同時に張れます。プールの
+残り半分は、フローテーブルが数えなくなった pcb (TIME_WAIT / LAST_ACK / CLOSING はフローより
+長生きする) が居座るための余白として確保してあります。
+
+JSON では `"hybrid"` オブジェクトに snake_case キーで指定します（`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `egress_allow`, `egress_deny`）。
+
+> egress ACL は `EgressAllow`/`EgressDeny` を何も設定しなくても RFC1918・
+> ループバック・リンクローカル宛をデフォルト拒否します。侵害されたクライアントが
+> サーバを内部ネットワークへの踏み台に使うことへの安全側デフォルトです。
+
+### `[Advanced]`
+
+| キー | 説明 | デフォルト |
+|------|------|-----------|
+| `RecvRateLimit` | コネクションレベルの受信レート上限（バイト/秒）。QUIC の集約受信ウィンドウを `rate × RTT` に制限します。クライアント側のみ有効 — サーバは無視します（サーバ側で制限するとクライアントのアップロードを絞ってしまうため）。最大値は `10000000000`（10 GB/s）で、それを超える値は警告とともに拒否され `0` にフォールバックします。メモリ制約がある場合を除き `0` のままにしてください（モバイルクライアントは内部で設定します） | `0`（無効） |
+| `UdpGso` | 高スループット時に UDP 送信をカーネル GSO でバッチ化し、CPU 使用率を下げます。非対応カーネル（4.18 未満）では通常のバッチ送信に自動的にフォールバックします。Linux / Android のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前のパケット単位の送信経路に戻ります | `true` |
+| `UdpGro` | 高スループット時に受信 UDP パケットをカーネル GRO でまとめて受け取り、CPU 使用率を下げます。非対応カーネル（5.0 未満）では 1 パケットずつの受信に自動的にフォールバックします。Linux のみ有効 — それ以外のプラットフォームでは効果がありません。`false` にすると以前の受信経路に戻ります | `true` |
+
+JSON では `"advanced"` オブジェクトに snake_case キーで指定します（`recv_rate_limit`, `udp_gso`, `udp_gro`）。
+
 ## MTU ガイドライン
 
-### デフォルト（auto）— 通常はそのままで OK
+### デフォルト（auto)
 
 ほとんどの環境では `MTU` を設定する必要はありません。自動ネゴシエーションで決まる値（約 1382）は、標準的な Ethernet（1500）、PPPoE（1492）、モバイル回線でそのまま使えます。
 

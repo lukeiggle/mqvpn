@@ -4,6 +4,13 @@
 package com.mqvpn.app.di
 
 import android.content.Context
+import androidx.datastore.core.DataStore
+import androidx.datastore.core.handlers.ReplaceFileCorruptionHandler
+import androidx.datastore.preferences.core.Preferences
+import androidx.datastore.preferences.core.PreferenceDataStoreFactory
+import androidx.datastore.preferences.core.emptyPreferences
+import androidx.datastore.preferences.preferencesDataStoreFile
+import com.mqvpn.app.data.SettingsRepository
 import com.mqvpn.sdk.core.MqvpnManager
 import dagger.Module
 import dagger.Provides
@@ -19,5 +26,16 @@ object MqvpnModule {
     @Singleton
     fun provideMqvpnManager(@ApplicationContext context: Context): MqvpnManager {
         return MqvpnManager(context)
+    }
+
+    @Provides
+    @Singleton
+    fun provideDataStore(@ApplicationContext context: Context): DataStore<Preferences> {
+        return PreferenceDataStoreFactory.create(
+            corruptionHandler = ReplaceFileCorruptionHandler { emptyPreferences() },
+            migrations = SettingsRepository.MIGRATIONS,
+        ) {
+            context.preferencesDataStoreFile("demo_settings")
+        }
     }
 }

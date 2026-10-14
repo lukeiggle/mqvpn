@@ -26,7 +26,20 @@ User = bob:<BOB_PSK>
 [Multipath]
 Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
+
+[Hybrid]
+Enabled = true
+
+[Reorder]
+Enabled = on
 ```
+
+When you use a CA-issued certificate, `Cert` (`cert_file` in JSON) must contain
+the full chain: the server certificate followed by its intermediates (for Let's
+Encrypt, `fullchain.pem`, not `cert.pem`). Clients verify the chain exactly as
+the server presents it and do not fetch missing intermediates, so a leaf-only
+file fails verification on any client that does not already trust the
+intermediate.
 
 ### Client
 
@@ -50,6 +63,12 @@ Scheduler = wlb
 # CC = bbr2                     # Congestion control (bbr2|bbr|cubic|none)
 Path = eth0
 Path = wlan0
+
+# [Hybrid]                      # opt in to carry inner TCP over QUIC streams; see the [Hybrid] section
+# Enabled = true
+
+# [Reorder]                     # opt in for bulk inner QUIC; see the [Reorder] section
+# Enabled = on
 ```
 
 ## JSON Format
@@ -75,9 +94,13 @@ JSON config is useful for structured management and automation tooling.
   ],
   "max_clients": 64,
   "scheduler": "wlb",
-  "cc": "bbr2"
+  "cc": "bbr2",
+  "hybrid": { "enabled": true },
+  "reorder": { "enabled": "on" }
 }
 ```
+
+`cert_file` takes the full chain as well (see the note under the INI server example).
 
 ### Client
 
@@ -127,7 +150,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 |-----|-------------|---------|
 | `Address` | Server address (`HOST:PORT`, e.g. `[2001:db8::1]:443` for IPv6) | Required |
 | `ServerName` | TLS SNI and certificate verification name. Use when connecting by IP but verifying against a domain certificate | Address host |
-| `Insecure` | Skip TLS certificate verification | `false` |
+| `Insecure` | Skip TLS certificate verification (self-signed test setups only). With `false` the certificate is verified against the system store (`/etc/ssl`; override with `SSL_CERT_FILE` / `SSL_CERT_DIR`); on Linux/macOS (and on Windows with a custom trust path), when connecting by IP address set `ServerName` to the certificate's DNS name; with the Windows certificate store an IP literal matches an `iPAddress` SAN directly. On Windows the certificate is verified against the Windows certificate stores; if `SSL_CERT_FILE` (a PEM bundle) or `SSL_CERT_DIR` (a hashed certificate directory) is set, that custom trust path is used instead, as on Linux. On Android the certificate is verified against the device's CA store and the app's network security config; `tlsServerName` (the SDK counterpart of `ServerName`) is the name it must match, and it must be a bare host name or IP literal (no brackets). | `false` |
 
 ### `[Interface]`
 
@@ -139,10 +162,17 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `TunName` | TUN device name | `mqvpn0` |
 | `DNS` | DNS servers (comma-separated) | — |
 | `LogLevel` | Log level (`debug`, `info`, `warn`, `error`) | `info` |
-| `KillSwitch` | Block traffic outside the VPN tunnel (client only) | `false` |
+| `KillSwitch` | Block traffic outside the VPN tunnel (client only). Also stops applications that bind to a specific network adapter from bypassing the tunnel. | `false` |
 | `Reconnect` | Enable automatic reconnection (client only) | `true` |
 | `ReconnectInterval` | Seconds between reconnection attempts | `5` |
+| `ManageRoutes` | Manage the host routing table (VPN routes and server pin route). Set to `false` (or pass `--no-manage-routes`) to handle routing yourself. Routing alone does not stop applications that bind their sockets to a specific adapter — see the note below. | `true` |
 | `MTU` | TUN MTU (1280–9000). Client: cap — if the negotiated MTU is lower, the negotiated value is used. Server: sets the TUN MTU directly. | auto (client ~1382 negotiated, server 1382) |
+
+> **Note: route management does not cover interface-bound applications**
+>
+> mqvpn adds a split default route (`0.0.0.0/1` + `128.0.0.0/1`) instead of replacing the system default route, so the original default route stays in place. Applications that pick a network adapter by looking up the *system default route* — rather than the route to the destination — keep using the physical adapter and bypass the tunnel. Tailscale on Windows does this for its own sockets.
+>
+> This is independent of `ManageRoutes`. To stop such applications, set `KillSwitch = true`. Note that they are then **blocked outright rather than routed through the tunnel**.
 
 ### `[TLS]` (server only)
 
@@ -159,15 +189,27 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | `User` | Per-user PSK in `NAME:KEY` format (repeatable) | — |
 | `MaxClients` | Maximum concurrent clients (server only) | `64` |
 
+In JSON, use `auth_key` on both client and server (as in the examples above).
+
 ### `[Multipath]`
 
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Scheduler` | Scheduler algorithm (`minrtt`, `wlb`, `wlb_udp_pin`, or `backup_fec`) | `wlb` |
+| `AllowClientScheduler` | Server only (`allow_client_scheduler` in JSON, or pass `--allow-client-scheduler`). When `true`, a client that asks for a scheduler gets it for its own connection's download direction; other clients keep the server's `Scheduler`. The request is not applied, and the connection keeps the scheduler it already has (at first, the server's `Scheduler`), when the client asks for `backup_fec`, when the server's `Scheduler` is `backup_fec`, when the same connection already changed its scheduler once, or when the connection already uses more than one path. | `false` |
+| `RequestServerScheduler` | Client only (`request_server_scheduler` in JSON, or pass `--request-server-scheduler`). When `true`, the client asks the server to use this client's `Scheduler` for its download direction too. Setting `Scheduler` alone still affects only the upload direction, as before. Takes effect only on servers with `AllowClientScheduler = true`. | `false` |
 | `CC` | Congestion control algorithm (`bbr2`, `bbr`, `cubic`, or `none`) | `bbr2` |
 | `Path` | Network interface to bind (repeatable) | Default interface |
+| `InitMaxPathId` | MP-QUIC draft-21 test knob: initial Maximum Path Identifier advertised in transport parameters (`1`–`4294967295`; `0` = xquic default `8`) | `0` |
+| `Reinjection` | Speculative duplication mode (`off`, `deadline`, `idle`, or `dgram`) | `off` |
+| `ReinjectionSrttFactorPct` | `deadline` mode: duplicate unacked packets older than factor × min_srtt, in percent (`100`–`1000`) | `110` |
+| `ReinjectionHardDeadlineMs` | `deadline` mode: upper clamp on the duplication deadline (`1`–`60000`) | `500` |
+| `ReinjectionDeadlineLowerBoundMs` | `deadline` mode: lower clamp; values above the hard deadline are clamped down to it (`1`–`60000`) | `20` |
 
-See [Multipath](./multipath) for scheduler details.
+A server of this version tells each connected client which scheduler it uses for that client, even when `AllowClientScheduler` is `false`. A client that sets `RequestServerScheduler` logs `server scheduler: <name> (requested <name>)` after it connects.
+
+See [Multipath](./multipath) for scheduler details and
+[Reinjection](./multipath#reinjection-speculative-duplication) for per-mode guidance.
 
 > `backup_fec` is experimental and requires both peers to run mqvpn ≥ 0.4.0
 > with FEC build enabled (`-DXQC_ENABLE_FEC=ON -DXQC_ENABLE_XOR=ON`).
@@ -177,9 +219,9 @@ See [Multipath](./multipath) for scheduler details.
 
 ### `[Reorder]`
 
-A flow-aware reorder buffer for inner UDP traffic. It targets a single inner connection (e.g. inner QUIC) that is itself spread across multiple paths by mqvpn's multipath aggregation: by holding briefly out-of-order datagrams and delivering them in order, it reduces the reordering the inner endpoint sees. Disabled by default (`Enabled = off`); when off the section has no effect and packets are forwarded unchanged.
+A flow-aware reorder buffer for inner UDP traffic. It targets a single inner connection (e.g. inner QUIC) that is itself spread across multiple paths by mqvpn's multipath aggregation: by holding briefly out-of-order datagrams and delivering them in order, it reduces the reordering the inner endpoint sees. Disabled by default (`Enabled = off`); when off the section has no effect and packets are forwarded unchanged. It only takes effect when both the server and the client set `Enabled = on`; the client log then shows `peer advertised mqvpn-reorder`.
 
-> **Scope:** the reorder buffer currently applies to **inner UDP flows only. Inner TCP is not yet handled by the reorder buffer (TODO).** Inner TCP instead relies on the scheduler's flow-pinning (`wlb` / `wlb_udp_pin`), which keeps a TCP flow on a single path, plus TCP's own reordering tolerance (RACK/SACK).
+> **Scope:** the reorder buffer applies to **inner UDP flows only. Inner TCP is not handled by the reorder buffer.** For inner TCP, enable hybrid mode ([`[Hybrid]`](#hybrid) below) instead — the QUIC stream layer restores ordering.
 
 | Key | Description | Default |
 |-----|-------------|---------|
@@ -199,7 +241,7 @@ A flow-aware reorder buffer for inner UDP traffic. It targets a single inner con
 
 Demotion in the ACK direction is automatic: a flow that looks like an ACK/control stream (mostly small packets) is moved to pass-through so it is never delayed. This is internal behaviour, not a configurable knob — tune it indirectly via `ClassifyWindow` / `AckDemoteMaxLarge` / `SmallPacketThreshold`.
 
-Reorder is a throughput-vs-latency trade-off — it helps bulk transfers but adds up to `MaxWaitMs` of delay to every flow it touches. Since one tunnel usually carries both kinds of traffic, per-port `[ReorderRule]` sections let you enable it where it helps (bulk inner QUIC) and pass latency-sensitive traffic through (DNS, NTP, real-time UDP). Unmatched UDP is pass-through by default, so you only need rules for the ports you want reordered:
+Reorder is a throughput-vs-latency trade-off — it helps bulk transfers but delays every flow it touches: `MaxWaitMs` is how long the receiver waits for a missing datagram before skipping it; a gap that opens while another is already being waited for is deferred to the next wait, so a hold is nominally at most twice `MaxWaitMs` (buffer-limit flushes can release a gap earlier, and because the deadline is checked periodically, a wait can run slightly past it). Datagrams that arrive in order are never delayed. Since one tunnel usually carries both kinds of traffic, per-port `[ReorderRule]` sections let you enable it where it helps (bulk inner QUIC) and pass latency-sensitive traffic through (DNS, NTP, real-time UDP). Unmatched UDP is pass-through by default, so you only need rules for the ports you want reordered:
 
 ```ini
 [Reorder]
@@ -216,7 +258,7 @@ Port = 53
 Profile = default_udp
 ```
 
-…or from the JSON equivalent. The `reorder` object uses snake_case keys mapping 1:1 to the INI keys above, and `reorder_rules` is an array of `{proto, port, profile}` objects (each rule may also carry optional `max_wait_ms` / `cap_packets` overrides):
+The same works in JSON. The `reorder` object uses snake_case keys mapping 1:1 to the INI keys above, and `reorder_rules` is an array of `{proto, port, profile}` objects (each rule may also carry optional `max_wait_ms` / `cap_packets` overrides):
 
 ```json
 {
@@ -280,9 +322,65 @@ Reorder is **off by default** and is meant to be opt-in only within its useful r
 | `MaxWaitMs` | Per-rule override of the hold time (ms). `0` is rejected with a warning — to pass a port through untouched use `Profile = default_udp` instead | profile preset |
 | `CapPackets` | Per-rule override of the per-flow buffer cap. Must be a non-zero power of two, or it is rejected with a warning | profile preset |
 
+### `[Hybrid]`
+
+Terminates inner TCP locally and relays it over an HTTP/3 request stream so a single TCP flow can aggregate multiple paths. Disabled by default. See [Hybrid Mode](./hybrid-mode) for the lane diagram, egress ACL semantics, and known limitations.
+
+| Key | Description | Applies to | Default |
+|-----|-------------|------------|---------|
+| `Enabled` | Master switch | client + server | `false` |
+| `Tcp` | Per-flow TCP lane policy: `stream` (always), `raw` (never — byte-identical to hybrid disabled), or `auto` (TCP lane once ≥2 paths are active at SYN time; latched for the flow's lifetime) | client | `auto` |
+| `TcpMaxFlows` | Concurrent TCP-lane flow cap. **The client and the server enforce it on different machinery and fail differently** — see **Notes on `TcpMaxFlows`** right below this table | client + server | `256` |
+| `TcpIdleTimeoutSec` | Idle-eviction timeout for TCP-lane flows; `0` disables idle eviction | client + server | `300` |
+| `TcpConnectTimeoutSec` | Timeout for the server's egress `connect()`; on expiry the client gets HTTP `504` | server | `10` |
+| `TcpMaxGlobalFlows` | Whole-server cap on concurrent egress TCP flows across all sessions | server | `4096` |
+| `EgressAllow` | CIDR allowed through the default-deny egress ACL for private ranges (repeatable, up to 32) | server | — |
+| `EgressDeny` | Additional CIDR to block, evaluated after `EgressAllow` (repeatable, up to 32) | server | — |
+
+#### Notes on `TcpMaxFlows`
+
+`TcpMaxFlows` behaves differently on the client and the server.
+The two sides share the key name and nothing else: what is counted, and what happens when
+the cap is hit, both differ.
+
+| | client | server |
+|---|---|---|
+| Counted in | the lane's own flow table | per client session |
+| Checked | **before lwIP ever sees the SYN** | when the CONNECT-TCP request arrives |
+| Inner TCP terminated | yes, by lwIP inside the lane | no — relayed over ordinary kernel sockets |
+| **Over the cap** | **degraded to the RAW lane** — the connection still works | **HTTP `503`**, and the client then **resets** that inner connection; no RAW fallback at that point |
+| Memory per flow | **~0.75 MiB** (uplink-queue ceiling) | **~32 KiB** (two lazily-allocated 16 KiB relay chunks) plus one fd |
+| Binding resource | RAM — worst case `TcpMaxFlows` × 0.75 MiB (≈ 192 MiB at the default 256, ≈ 3.0 GiB at 4096) | the **fd budget** — `TcpMaxGlobalFlows` is checked first, but size the RAM too: worst case `TcpMaxGlobalFlows` × 32 KiB (≈ 128 MiB at 4096) once every admitted flow has paused once in each direction |
+| Clamped | to **half** the lwIP TCP pcb pool (below) | not clamped (no lwIP involved) |
+
+**Client-side clamp:** the honored value is capped at half the lwIP TCP pcb pool —
+`4096` on desktop/router builds (Linux, Windows, macOS), `256` on Android, `64`
+with the [iOS lwIP profile](./hybrid-mode#ios-builds).
+
+**It does not halve your quota.** You may run the full honored number of flows at once.
+The other pool half is reserved as headroom for pcbs the flow table has stopped
+counting — TIME_WAIT, LAST_ACK and CLOSING outlive the flow itself.
+
+
+In JSON, the section is a `"hybrid"` object with snake_case keys (`enabled`, `tcp`, `tcp_max_flows`, `tcp_idle_timeout_sec`, `tcp_connect_timeout_sec`, `tcp_max_global_flows`, `egress_allow`, `egress_deny`).
+
+> The egress ACL default-denies RFC1918, loopback, and link-local targets even
+> with no `EgressAllow`/`EgressDeny` configured — a safety default against a
+> compromised client using the server as an internal-network pivot.
+
+### `[Advanced]`
+
+| Key | Description | Default |
+|-----|-------------|---------|
+| `RecvRateLimit` | Conn-level receive-rate cap in bytes/sec; bounds the aggregate QUIC receive window to `rate x RTT`. Client-side only — the server ignores it (a server-side cap would throttle client upload). Maximum `10000000000` (10 GB/s); larger values are rejected with a warning and the key falls back to `0`. Leave `0` unless memory-constrained (mobile clients set this internally) | `0` (off) |
+| `UdpGso` | Batches UDP sends with kernel GSO for lower CPU use at high throughput. Automatically falls back to regular batched sends on kernels without support (< 4.18). Linux and Android only; no effect elsewhere. Set to `false` to restore the previous per-packet send path | `true` |
+| `UdpGro` | Lets the kernel hand over received packets in batches, lowering CPU use at high throughput. Automatically falls back to one-at-a-time receives on kernels without support (< 5.0). Linux only; no effect elsewhere. Set to `false` to restore the previous receive path | `true` |
+
+In JSON, the section is an `"advanced"` object with snake_case keys (`recv_rate_limit`, `udp_gso`, `udp_gro`).
+
 ## MTU Guidelines
 
-### Default (auto) — most deployments
+### Default (auto)
 
 For most setups, leave `MTU` unset. The auto-negotiated value (~1382) works on standard Ethernet (1500), PPPoE (1492), and mobile networks.
 

@@ -50,7 +50,11 @@
                                mqvpn_server_get_client_fec_stats,
                                mqvpn_server_get_all_fec_stats,
                                mqvpn_server_get_reorder_stats,
-                               mqvpn_reorder_stats_t (via reorder.h) */
+                               mqvpn_reorder_stats_t (via reorder.h),
+                               mqvpn_internal_client_reinject_t,
+                               mqvpn_server_get_client_reinject,
+                               mqvpn_internal_client_sched_t,
+                               mqvpn_server_get_client_sched */
 
 #include <stdlib.h>
 #include <string.h>
@@ -91,14 +95,20 @@ struct ctrl_socket_s {
     struct event *ev_accept;
     struct event_base *eb;
     mqvpn_server_t *server;
+    /* Getter into the platform's transport ctx for the RX offload counters;
+     * see ctrl_socket_create's doc for why these do not travel through
+     * mqvpn_stats_t. NULL fn = report 0. */
+    ctrl_rx_stats_fn rx_stats;
+    void *rx_ctx;
     int n_conns; /* active control connections */
 };
 
 /* ── Command dispatch ────────────────────────────────────────────────────── */
 
 static int
-ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     char name[64] = {0}, key[256] = {0};
     const char *nv = json_find_key(req, "name");
     const char *kv = json_find_key(req, "key");
@@ -115,8 +125,9 @@ ctrl_cmd_add_user(const char *req, char *resp, size_t resp_len, mqvpn_server_t *
 }
 
 static int
-ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     char name[64] = {0};
     const char *nv = json_find_key(req, "name");
     if (!nv || json_read_string(nv, name, sizeof(name)) < 0)
@@ -129,8 +140,9 @@ ctrl_cmd_remove_user(const char *req, char *resp, size_t resp_len, mqvpn_server_
 }
 
 static int
-ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     char unames[MQVPN_MAX_USERS][64];
     int n_users = mqvpn_server_list_users(server, unames, MQVPN_MAX_USERS);
@@ -153,14 +165,17 @@ ctrl_cmd_list_users(const char *req, char *resp, size_t resp_len, mqvpn_server_t
 }
 
 static int
-ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     mqvpn_stats_t st = {0};
     st.struct_size = sizeof(st);
     mqvpn_server_get_stats(server, &st);
     int nc = mqvpn_server_get_n_clients(server);
     uint64_t uptime = mqvpn_server_uptime_seconds(server);
+    uint64_t rx_receives = 0, rx_datagrams = 0;
+    if (cs->rx_stats) cs->rx_stats(cs->rx_ctx, &rx_receives, &rx_datagrams);
     return snprintf(
         resp, resp_len,
         "{\"ok\":true,\"n_clients\":%d,"
@@ -171,20 +186,43 @@ ctrl_cmd_get_stats(const char *req, char *resp, size_t resp_len, mqvpn_server_t 
         "\"pkts_lane_raw\":%" PRIu64 ",\"pkts_lane_tcp_dropped\":%" PRIu64 ","
         "\"tcp_flows_active\":%" PRIu64 ",\"tcp_flows_total\":%" PRIu64 ","
         "\"tcp_flows_rejected\":%" PRIu64 ",\"raw_markers_active\":%" PRIu64 ","
+        /* udp_tx_* from the library (it issues those sends); udp_rx_* from the
+         * platform's transport getter (RX offload never crosses the library
+         * ABI). datagrams/sends and datagrams/receives are the achieved
+         * batching and coalescing factors — 1.0 means every datagram cost
+         * its own syscall, which the one-shot "udp-gso:"/"udp-gro:" startup
+         * markers cannot distinguish because they only report the kernel
+         * capability probe. */
+        "\"udp_tx_sends\":%" PRIu64 ",\"udp_tx_datagrams\":%" PRIu64 ","
+        "\"udp_rx_receives\":%" PRIu64 ",\"udp_rx_datagrams\":%" PRIu64 ","
         "\"uptime_sec\":%" PRIu64 "}",
         nc, st.bytes_tx, st.bytes_rx, st.dgram_sent, st.dgram_recv, st.dgram_lost,
         st.dgram_acked, st.pkts_lane_tcp, st.pkts_lane_dgram, st.pkts_lane_raw,
         st.pkts_lane_tcp_dropped, st.tcp_flows_active, st.tcp_flows_total,
-        st.tcp_flows_rejected, st.raw_markers_active, uptime);
+        st.tcp_flows_rejected, st.raw_markers_active, st.udp_tx_sends,
+        st.udp_tx_datagrams, rx_receives, rx_datagrams, uptime);
 }
 
 static int
-ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     mqvpn_client_info_t clients[MQVPN_MAX_USERS];
     int n_clients = 0;
     mqvpn_server_get_client_info(server, clients, MQVPN_MAX_USERS, &n_clients);
+
+    /* Index-aligned with clients[] above — contract is on
+     * mqvpn_server_get_client_reinject() in mqvpn_internal.h. Matched by
+     * path_id below anyway, not by array position alone. */
+    mqvpn_internal_client_reinject_t reinj[MQVPN_MAX_USERS];
+    int n_reinj = mqvpn_server_get_client_reinject(server, reinj, MQVPN_MAX_USERS);
+    if (n_reinj < 0) n_reinj = 0;
+
+    /* Same index alignment, see mqvpn_server_get_client_sched(). */
+    mqvpn_internal_client_sched_t sched[MQVPN_MAX_USERS];
+    int n_sched = mqvpn_server_get_client_sched(server, sched, MQVPN_MAX_USERS);
+    if (n_sched < 0) n_sched = 0;
 
     uint64_t now = 0;
     struct timeval tv;
@@ -220,24 +258,42 @@ ctrl_cmd_get_status(const char *req, char *resp, size_t resp_len, mqvpn_server_t
                                 : 0;
 
         if (i > 0) APPEND(",");
-        APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\","
+        APPEND("{\"user\":\"%s\",\"endpoint\":\"%s\",\"scheduler\":\"%s\","
                "\"connected_sec\":%" PRIu64 ","
                "\"bytes_tx\":%" PRIu64 ",\"bytes_rx\":%" PRIu64 ","
                "\"n_paths\":%d,\"paths\":[",
-               ci->username, ci->endpoint, conn_sec, ci->bytes_tx, ci->bytes_rx,
-               ci->n_paths);
+               ci->username, ci->endpoint, i < n_sched ? sched[i].scheduler : "unknown",
+               conn_sec, ci->bytes_tx, ci->bytes_rx, ci->n_paths);
 
         for (int p = 0; p < ci->n_paths; p++) {
             mqvpn_path_stats_t *ps = &ci->paths[p];
             if (p > 0) APPEND(",");
+
+            /* Emit 0 on mismatch/absence (index out of range, or no path_id
+             * match within reinj[i]) rather than skipping the field — the
+             * JSON shape must stay constant so test_control_response_bound's
+             * worst-case model holds. */
+            uint64_t reinject_tx_bytes = 0;
+            if (i < n_reinj) {
+                mqvpn_internal_client_reinject_t *re = &reinj[i];
+                for (int rp = 0; rp < re->n_paths; rp++) {
+                    if (re->paths[rp].path_id == ps->path_id) {
+                        reinject_tx_bytes = re->paths[rp].reinject_tx_bytes;
+                        break;
+                    }
+                }
+            }
+
             APPEND(
                 "{\"path_id\":%" PRIu64 ",\"srtt_ms\":%" PRIu64 ",\"min_rtt_ms\":%" PRIu64
                 ",\"cwnd\":%" PRIu64 ",\"in_flight\":%" PRIu64 ",\"bytes_tx\":%" PRIu64
                 ",\"bytes_rx\":%" PRIu64 ",\"pkt_sent\":%" PRIu64 ",\"pkt_recv\":%" PRIu64
-                ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\"}",
+                ",\"pkt_lost\":%" PRIu64 ",\"state\":%u,\"state_label\":\"%s\","
+                "\"reinject_tx_bytes\":%" PRIu64 "}",
                 ps->path_id, ps->srtt_us / 1000, ps->min_rtt_us / 1000, ps->cwnd,
                 ps->bytes_in_flight, ps->bytes_tx, ps->bytes_rx, ps->pkt_sent,
-                ps->pkt_recv, ps->pkt_lost, ps->state, mqvpn_path_state_label(ps->state));
+                ps->pkt_recv, ps->pkt_lost, ps->state, mqvpn_path_state_label(ps->state),
+                reinject_tx_bytes);
         }
 
         APPEND("]}");
@@ -258,9 +314,9 @@ get_status_done:
 }
 
 static int
-ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len,
-                        mqvpn_server_t *server)
+ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     const char *ver = mqvpn_version_string();
     const char *sched = mqvpn_server_scheduler_label(server);
@@ -276,9 +332,9 @@ ctrl_cmd_get_build_info(const char *req, char *resp, size_t resp_len,
 }
 
 static int
-ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len,
-                       mqvpn_server_t *server)
+ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     char user[64] = {0};
     const char *uv = json_find_key(req, "user");
     if (!uv || json_read_string(uv, user, sizeof(user)) < 0)
@@ -313,8 +369,9 @@ ctrl_cmd_get_fec_stats(const char *req, char *resp, size_t resp_len,
 
 static int
 ctrl_cmd_get_all_fec_stats(const char *req, char *resp, size_t resp_len,
-                           mqvpn_server_t *server)
+                           ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     /* Bulk variant collapsing the per-user N+1 RPC pattern in scrapers
      * (Prometheus exporter) to a single call. Same XQC_ENABLE_FEC guard
@@ -372,8 +429,9 @@ get_all_fec_done:
 
 static int
 ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
-                           mqvpn_server_t *server)
+                           ctrl_socket_t *cs)
 {
+    mqvpn_server_t *server = cs->server;
     (void)req;
     /* Aggregate reorder-shim RX counters across all live conns (§17). One
      * fixed-shape object, no per-conn array, so a single snprintf with a
@@ -406,8 +464,12 @@ ctrl_cmd_get_reorder_stats(const char *req, char *resp, size_t resp_len,
         mqvpn_reorder_latency_buffered_percentile(&rs, 0.99));
 }
 
+/* Commands take the whole socket context, not just the server handle: some
+ * answers (get_stats' udp_rx_* pair) come from platform-owned state that
+ * never crosses the library ABI. Handlers that only need the server open
+ * with `mqvpn_server_t *server = cs->server;` and are otherwise unchanged. */
 typedef int (*ctrl_cmd_fn)(const char *req, char *resp, size_t resp_len,
-                           mqvpn_server_t *server);
+                           ctrl_socket_t *cs);
 
 /* Keep in sync (and in order) with the file-header command list. */
 static const struct {
@@ -426,7 +488,7 @@ static const struct {
 };
 
 static int
-dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
+dispatch(const char *req, char *resp, size_t resp_len, ctrl_socket_t *cs)
 {
     char cmd[32] = {0};
     const char *v = json_find_key(req, "cmd");
@@ -435,7 +497,7 @@ dispatch(const char *req, char *resp, size_t resp_len, mqvpn_server_t *server)
 
     for (size_t i = 0; i < sizeof(ctrl_cmds) / sizeof(ctrl_cmds[0]); i++)
         if (strcmp(cmd, ctrl_cmds[i].name) == 0)
-            return ctrl_cmds[i].fn(req, resp, resp_len, server);
+            return ctrl_cmds[i].fn(req, resp, resp_len, cs);
 
     return snprintf(resp, resp_len, "{\"ok\":false,\"error\":\"unknown cmd\"}");
 }
@@ -519,7 +581,7 @@ ctrl_on_read(evutil_socket_t fd, short what, void *arg)
     conn->req[conn->req_len] = '\0';
 
     char resp[CTRL_MAX_RESP_BYTES];
-    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs->server);
+    int rlen = dispatch(conn->req, resp, sizeof(resp) - 2, conn->cs);
     if (rlen <= 0) {
         /* dispatch failed to format anything — close silently. */
     } else if ((size_t)rlen >= sizeof(resp) - 2) {
@@ -591,7 +653,7 @@ ctrl_on_accept(evutil_socket_t fd, short what, void *arg)
 
 ctrl_socket_t *
 ctrl_socket_create(struct event_base *eb, const char *addr, int port,
-                   mqvpn_server_t *server)
+                   mqvpn_server_t *server, ctrl_rx_stats_fn rx_stats, void *rx_ctx)
 {
     if (!eb || port <= 0 || port > 65535 || !server) return NULL;
 
@@ -607,6 +669,9 @@ ctrl_socket_create(struct event_base *eb, const char *addr, int port,
     if (!cs) return NULL;
     cs->eb = eb;
     cs->server = server;
+    /* Borrowed getter — the platform ctx outlives this socket. */
+    cs->rx_stats = rx_stats;
+    cs->rx_ctx = rx_ctx;
 
     /* Determine address family */
     struct sockaddr_in sin4;

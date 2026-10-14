@@ -18,6 +18,7 @@
 #define MQVPN_SERVER_INTERNAL_H
 
 #include "libmqvpn.h"          /* mqvpn_server_t */
+#include "mqvpn_internal.h"    /* MQVPN_INTERNAL */
 #include "hybrid/classifier.h" /* mqvpn_cidr_entry_t */
 
 #include <stddef.h>
@@ -40,7 +41,18 @@ typedef struct {
     size_t path_len;
     const char *auth_token; /* Bearer payload, not NUL-terminated */
     size_t auth_token_len;
+    int has_sched_hdr; /* request carried mqvpn-scheduler */
+    const char *sched; /* raw value, not NUL-terminated */
+    size_t sched_len;
+    int has_reorder_hdr; /* request advertised mqvpn-reorder (§19.3). Applied to
+                          * conn->peer_reorder_supported ONLY when this request
+                          * establishes the CONNECT-IP tunnel — a rejected
+                          * duplicate or unrelated request must not mutate the
+                          * live tunnel's negotiated stamping. */
 } svr_req_headers_t;
+
+/* Test hook (mqvpn_server.c). */
+MQVPN_INTERNAL const char *mqvpn_server_test_sched_refusal_reason(int xqc_rc);
 
 /* Whether request-level auth (Bearer PSK) must be checked before granting a
  * MASQUE request. Identical condition for CONNECT-IP and connect-tcp on
@@ -159,6 +171,18 @@ void svr_egress_fd_unregister(mqvpn_server_t *s, int fd);
  * tcp_egress.c's connect-deadline computation doesn't introduce a second
  * clock idiom. */
 uint64_t svr_now_us(void);
+
+/* Drive the engine once if (and only if) the deferred send flush is engaged
+ * (tx_batch); a no-op otherwise, and a no-op when called from inside an
+ * engine callback (xquic's XQC_ENG_FLAG_RUNNING re-entrancy guard). Lets
+ * tcp_egress.c push already-accepted stream data onto the wire before an
+ * abort would drop it; mqvpn_server_destroy calls it too, so the definition
+ * is compiled on every platform (not under MQVPN_HYBRID_TCP_EGRESS_ENABLED
+ * — the deferred flush is a UDP-GSO concern, independent of TCP egress).
+ * May run timers and close/destroy connections and
+ * flows — callers must re-validate every flow pointer they held across the
+ * call (pointer-identity scan of the flow list; do NOT dereference first). */
+void svr_flush_deferred_sends(mqvpn_server_t *s);
 
 /* Logging bridge: tcp_egress.c has no logging path of its own (a deliberate
  * narrow boundary from the previous task); connect-stage observability

@@ -74,6 +74,13 @@ usage(const char *prog)
         "  --cc bbr2|bbr|cubic|none  Congestion control algorithm (default bbr2)\n"
         "  --scheduler minrtt|wlb|wlb_udp_pin|backup_fec\n"
         "                            Multipath scheduler (default wlb)\n"
+        "  --allow-client-scheduler  Let clients pick the download scheduler for their "
+        "own\n"
+        "                            connection (server mode)\n"
+        "  --request-server-scheduler\n"
+        "                            Ask the server to use --scheduler for the download "
+        "too\n"
+        "                            (client mode)\n"
         "  --init-max-path-id N      MP-QUIC draft-21 test knob: initial path-id "
         "credit\n"
         "                            TP (default = xquic default 8; set lower, "
@@ -164,6 +171,8 @@ main(int argc, char *argv[])
         {"kill-switch", no_argument, NULL, 'K'},
         {"no-manage-routes", no_argument, NULL, 0x103},
         {"tls-server-name", required_argument, NULL, 0x104},
+        {"allow-client-scheduler", no_argument, NULL, 0x105},
+        {"request-server-scheduler", no_argument, NULL, 0x106},
         {"control-port", required_argument, NULL, 'X'},
         {"control-addr", required_argument, NULL, 'x'},
         {"status", no_argument, NULL, 'T'},
@@ -182,6 +191,8 @@ main(int argc, char *argv[])
     const char *cert_file = NULL;
     const char *key_file = NULL;
     int insecure = -1; /* -1 means "not set by CLI" */
+    int allow_client_sched = -1;
+    int request_server_sched = -1;
     const char *tls_server_name = NULL;
     const char *auth_key = NULL;
     char cli_user_names[MQVPN_CONFIG_MAX_USERS][64];
@@ -308,6 +319,8 @@ main(int argc, char *argv[])
         case 'K': kill_switch = 1; break;
         case 0x103: manage_routes = 0; break; /* --no-manage-routes */
         case 0x104: tls_server_name = optarg; break;
+        case 0x105: allow_client_sched = 1; break;
+        case 0x106: request_server_sched = 1; break;
         case 'X':
             control_port = atoi(optarg);
             control_port_set = 1;
@@ -384,6 +397,11 @@ main(int argc, char *argv[])
     const char *eff_cert = cert_file ? cert_file : file_cfg.cert_file;
     const char *eff_key = key_file ? key_file : file_cfg.key_file;
     int eff_insecure = insecure >= 0 ? insecure : file_cfg.insecure;
+    int eff_allow_client_sched =
+        allow_client_sched >= 0 ? allow_client_sched : file_cfg.allow_client_scheduler;
+    int eff_request_server_sched = request_server_sched >= 0
+                                       ? request_server_sched
+                                       : file_cfg.request_server_scheduler;
     int eff_max_clients = max_clients >= 0 ? max_clients : file_cfg.max_clients;
     int eff_tun_mtu = cli_mtu >= 0 ? cli_mtu : file_cfg.tun_mtu;
 
@@ -480,6 +498,23 @@ main(int argc, char *argv[])
 #endif
     }
 
+    /* Parse reinjection mode. No CLI flag (config file/JSON only — YAGNI).
+     * Name lookup is the shared table (mqvpn_sched_names.h). Unlike the
+     * scheduler/cc CLI gates above, an unrecognized value here is a WARN +
+     * fallback to "off", not a fatal error: mqvpn_config.c's JSON surface is
+     * the hard-error surface for this key (see that file's parse_reinj_name
+     * call site). */
+    int reinj_lookup = mqvpn_reinj_from_name(file_cfg.reinjection);
+    int reinjection = MQVPN_REINJ_OFF;
+    if (reinj_lookup < 0) {
+        fprintf(stderr,
+                "warning: [Multipath] Reinjection '%s' not recognized "
+                "(expected 'off', 'deadline', 'idle', or 'dgram'); using 'off'\n",
+                file_cfg.reinjection);
+    } else {
+        reinjection = reinj_lookup;
+    }
+
     /* Paths: CLI paths override config paths entirely */
     if (n_paths == 0 && file_cfg.n_paths > 0) {
         n_paths = file_cfg.n_paths;
@@ -528,6 +563,7 @@ main(int argc, char *argv[])
             .log_level = log_level,
             .n_paths = n_paths,
             .scheduler = scheduler,
+            .request_server_scheduler = eff_request_server_sched,
             .auth_key = eff_auth_key,
             .n_dns = n_dns,
             .reconnect = eff_reconnect,
@@ -537,12 +573,22 @@ main(int argc, char *argv[])
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .cc = cc,
+            .reinjection = reinjection,
+            .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
+            .reinj_hard_deadline_ms = file_cfg.reinjection_hard_deadline_ms,
+            .reinj_deadline_lower_bound_ms = file_cfg.reinjection_deadline_lower_bound_ms,
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,
             /* INI [Hybrid]; always valid (mqvpn_config_defaults seeds the
              * disabled defaults even with no [Hybrid] section). */
             .hybrid = file_cfg.hybrid,
+            /* [Advanced]; 0 = off. Client-only (server path never reads it). */
+            .recv_rate_limit = file_cfg.recv_rate_limit,
+            /* [Advanced] UdpGso; default 1. Applies to client and server. */
+            .udp_gso = file_cfg.udp_gso,
+            /* [Advanced] UdpGro; default 1. Applies to client and server. */
+            .udp_gro = file_cfg.udp_gro,
             /* INI [ClientManagement]; no CLI flags in v1. */
             .client_mgmt_enabled = file_cfg.client_mgmt_enabled,
             .client_mgmt_endpoint = file_cfg.client_mgmt_endpoint,
@@ -587,6 +633,7 @@ main(int argc, char *argv[])
             .key_file = eff_key,
             .log_level = log_level,
             .scheduler = scheduler,
+            .allow_client_scheduler = eff_allow_client_sched,
             .auth_key = eff_auth_key,
             .n_users = eff_n_users,
             .max_clients = eff_max_clients,
@@ -595,12 +642,20 @@ main(int argc, char *argv[])
             .init_max_path_id = eff_init_max_path_id,
             .tun_mtu = eff_tun_mtu,
             .cc = cc,
+            .reinjection = reinjection,
+            .reinj_srtt_factor_pct = file_cfg.reinjection_srtt_factor_pct,
+            .reinj_hard_deadline_ms = file_cfg.reinjection_hard_deadline_ms,
+            .reinj_deadline_lower_bound_ms = file_cfg.reinjection_deadline_lower_bound_ms,
             /* INI [Reorder]/[ReorderRule]; always valid (mqvpn_config_defaults
              * seeds mode OFF even with no [Reorder] section). No CLI flags in v1. */
             .reorder = file_cfg.reorder,
             /* INI [Hybrid]; always valid (mqvpn_config_defaults seeds the
              * disabled defaults even with no [Hybrid] section). */
             .hybrid = file_cfg.hybrid,
+            /* [Advanced] UdpGso; default 1. Applies to client and server. */
+            .udp_gso = file_cfg.udp_gso,
+            /* [Advanced] UdpGro; default 1. Applies to client and server. */
+            .udp_gro = file_cfg.udp_gro,
         };
         for (int i = 0; i < eff_n_users; i++) {
             cfg.user_names[i] = eff_user_names[i];

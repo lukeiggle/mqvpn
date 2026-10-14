@@ -26,6 +26,7 @@ class MqvpnConfigTest {
         assertFalse(config.insecure)
         assertTrue(config.multipathEnabled)
         assertEquals(MqvpnConfig.Scheduler.MIN_RTT, config.scheduler)
+        assertFalse(config.requestServerScheduler)
         assertEquals(MqvpnConfig.LogLevel.INFO, config.logLevel)
         assertTrue(config.reconnect)
         assertEquals(5, config.reconnectIntervalSec)
@@ -151,5 +152,22 @@ class MqvpnConfigTest {
         val back = p.readParcelable<MqvpnConfig>(MqvpnConfig::class.java.classLoader)
         p.recycle()
         assertEquals(c, back)
+    }
+
+    @Test
+    fun bluetoothPath_defaultsToOff() {
+        assertFalse(MqvpnConfig(serverAddress = "h", authKey = "k").bluetoothPathEnabled)
+    }
+
+    @Test
+    fun bluetoothPath_jsonRoundTrip() {
+        val c = MqvpnConfig(serverAddress = "h", authKey = "k", bluetoothPathEnabled = true)
+        assertEquals(c, MqvpnConfig.fromJson(c.toJson()))
+    }
+
+    @Test
+    fun oldJsonWithoutBluetoothPath_decodesWithDefault() {
+        val oldJson = """{"serverAddress":"h","authKey":"k"}"""
+        assertFalse(MqvpnConfig.fromJson(oldJson).bluetoothPathEnabled)
     }
 }

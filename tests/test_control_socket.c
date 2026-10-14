@@ -40,6 +40,9 @@ static uint64_t g_uptime = 0;
 static int g_client_info_n = 0;
 static mqvpn_client_info_t g_client_info_tmpl;
 
+static mqvpn_internal_client_reinject_t g_reinject_tmpl; /* configured per test */
+static int g_sched_n = 1; /* entries the sched getter returns */
+
 static int g_fec_rc = 1;
 static mqvpn_internal_fec_stats_t g_fec_tmpl;
 
@@ -87,6 +90,8 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->struct_size = sizeof(*out);
     out->bytes_tx = 111;
     out->tcp_flows_total = 7;
+    out->udp_tx_sends = 1234;
+    out->udp_tx_datagrams = 5678;
     return 0;
 }
 
@@ -133,6 +138,27 @@ const char *
 mqvpn_version_string(void)
 {
     return "9.9.9-test";
+}
+
+int
+mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
+                                 mqvpn_internal_client_reinject_t *out, int max)
+{
+    (void)s;
+    if (max > 0) out[0] = g_reinject_tmpl;
+    return max > 0 ? 1 : 0;
+}
+
+int
+mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sched_t *out,
+                              int max)
+{
+    (void)s;
+    if (g_sched_n < 0) return -1;
+    int n = g_sched_n < max ? g_sched_n : max;
+    for (int i = 0; i < n; i++)
+        snprintf(out[i].scheduler, sizeof(out[i].scheduler), "wlb");
+    return n;
 }
 
 int
@@ -220,11 +246,29 @@ static int g_dummy_server; /* opaque sentinel — stubs never dereference it */
         }                                                                            \
     } while (0)
 
+/* Stand-in for the platform's transport getter (ctrl_rx_stats_fn). Non-zero
+ * and unequal so a get_stats regression that hardcodes 0 or swaps the pair
+ * cannot pass. */
+static void
+test_rx_stats(void *ctx, uint64_t *receives, uint64_t *datagrams)
+{
+    (void)ctx;
+    *receives = 61;
+    *datagrams = 83;
+}
+
 static void
 call(const char *req)
 {
     memset(g_resp, 0, sizeof(g_resp));
-    dispatch(req, g_resp, sizeof(g_resp) - 2, (mqvpn_server_t *)&g_dummy_server);
+    /* Stack-built context: dispatch and the handlers only read ->server and
+     * the RX-counter getter, never the libevent members. */
+    ctrl_socket_t cs = {
+        .server = (mqvpn_server_t *)&g_dummy_server,
+        .rx_stats = test_rx_stats,
+        .rx_ctx = NULL,
+    };
+    dispatch(req, g_resp, sizeof(g_resp) - 2, &cs);
 }
 
 /* ── Envelope / routing ───────────────────────────────────────────────────── */
@@ -333,6 +377,16 @@ test_get_stats(void)
     CHECK_HAS("\"bytes_tx\":111");
     CHECK_HAS("\"tcp_flows_total\":7");
     CHECK_HAS("\"uptime_sec\":4242");
+    /* Offload counters reach the JSON from BOTH sources: udp_tx_* through
+     * mqvpn_stats_t (the library issues those sends), udp_rx_* from the
+     * platform's transport getter (RX offload never crosses the library ABI).
+     * The get_stats body is a hand-written field-by-field snprintf, so a new
+     * mqvpn_stats_t field silently reads 0 here unless it is added in both
+     * places — that is exactly the failure this pins. */
+    CHECK_HAS("\"udp_tx_sends\":1234");
+    CHECK_HAS("\"udp_tx_datagrams\":5678");
+    CHECK_HAS("\"udp_rx_receives\":61");
+    CHECK_HAS("\"udp_rx_datagrams\":83");
 }
 
 /* ── get_status ───────────────────────────────────────────────────────────── */
@@ -355,6 +409,7 @@ test_get_status_one_client_with_path(void)
     g_client_info_tmpl.paths[0].path_id = 7;
     g_client_info_tmpl.paths[0].state = 2; /* -> "active" */
     g_client_info_n = 1;
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
 
     call("{\"cmd\":\"get_status\"}");
     CHECK_HAS("\"n_clients\":1");
@@ -362,6 +417,79 @@ test_get_status_one_client_with_path(void)
     CHECK_HAS("\"endpoint\":\"1.2.3.4:443\"");
     CHECK_HAS("\"path_id\":7");
     CHECK_HAS("\"state_label\":\"active\"");
+    CHECK_HAS("\"endpoint\":\"1.2.3.4:443\",\"scheduler\":\"wlb\"");
+}
+
+/* Sched getter shorter than the client list (or failing): unknown. */
+static void
+test_get_status_scheduler_missing(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
+    g_client_info_n = 1;
+    for (int n = 0; n >= -1; n--) {
+        g_sched_n = n;
+        call("{\"cmd\":\"get_status\"}");
+        CHECK_HAS("\"scheduler\":\"unknown\"");
+    }
+    g_sched_n = 1;
+}
+
+/* Alignment semantics (a): a reinject snapshot entry whose path_id matches
+ * the client-info path emits its nonzero value. */
+static void
+test_get_status_reinject_matched_path_id(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
+    g_client_info_tmpl.n_paths = 1;
+    g_client_info_tmpl.paths[0].path_id = 7;
+    g_client_info_tmpl.paths[0].state = 2;
+    g_client_info_n = 1;
+
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    g_reinject_tmpl.n_paths = 1;
+    g_reinject_tmpl.paths[0].path_id = 7;
+    g_reinject_tmpl.paths[0].reinject_tx_bytes = 99999;
+
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"path_id\":7");
+    CHECK_HAS("\"reinject_tx_bytes\":99999");
+}
+
+/* Alignment semantics (b): a mismatched or wholly absent path_id in the
+ * reinject snapshot both emit "reinject_tx_bytes":0 — the field is always
+ * present so the JSON shape stays constant regardless of match. Two phases
+ * pin the same constant-shape outcome from two different snapshot states. */
+static void
+test_get_status_reinject_mismatched_path_id(void)
+{
+    memset(&g_client_info_tmpl, 0, sizeof(g_client_info_tmpl));
+    strcpy(g_client_info_tmpl.username, "alice");
+    strcpy(g_client_info_tmpl.endpoint, "1.2.3.4:443");
+    g_client_info_tmpl.n_paths = 1;
+    g_client_info_tmpl.paths[0].path_id = 7;
+    g_client_info_tmpl.paths[0].state = 2;
+    g_client_info_n = 1;
+
+    /* Phase 1: reinject snapshot has an entry, but its path_id mismatches. */
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl));
+    g_reinject_tmpl.n_paths = 1;
+    g_reinject_tmpl.paths[0].path_id = 42; /* mismatch vs client path_id 7 */
+    g_reinject_tmpl.paths[0].reinject_tx_bytes = 99999;
+
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"path_id\":7");
+    CHECK_HAS("\"reinject_tx_bytes\":0");
+
+    /* Phase 2: reinject snapshot has no entry at all (n_paths == 0). */
+    memset(&g_reinject_tmpl, 0, sizeof(g_reinject_tmpl)); /* n_paths = 0 */
+
+    call("{\"cmd\":\"get_status\"}");
+    CHECK_HAS("\"path_id\":7");
+    CHECK_HAS("\"reinject_tx_bytes\":0");
 }
 
 /* ── get_build_info ───────────────────────────────────────────────────────── */
@@ -492,6 +620,9 @@ main(void)
 
     test_get_status_empty();
     test_get_status_one_client_with_path();
+    test_get_status_scheduler_missing();
+    test_get_status_reinject_matched_path_id();
+    test_get_status_reinject_mismatched_path_id();
 
     test_get_build_info();
 

@@ -34,9 +34,25 @@ struct event_base;
 
 typedef struct ctrl_socket_s ctrl_socket_t;
 
-/* addr defaults to "127.0.0.1" when NULL. */
+/* Receive-side UDP offload counters are owned by the platform's transport
+ * ctx (mqvpn_bind_posix), so the control socket asks for them at request
+ * time through this getter instead of borrowing pointers. rx_ctx is
+ * opaque; fn may be NULL (reported as 0). No synchronization: the getter
+ * runs on the same libevent loop as the RX path. */
+typedef void (*ctrl_rx_stats_fn)(void *rx_ctx, uint64_t *receives, uint64_t *datagrams);
+
+/* addr defaults to "127.0.0.1" when NULL.
+ *
+ * rx_stats reports the live receive-side UDP offload counters, emitted by
+ * get_stats as udp_rx_*. They come in as a callback rather than through
+ * mqvpn_stats_t because RX offload is a transport-implementation detail
+ * (mqvpn_bind_posix), not a library concept: the library's mqvpn_stats_t
+ * carries the transport-agnostic TX pair only. The transmit-side pair does
+ * cross that ABI (mqvpn_stats_t.udp_tx_*) precisely because the library
+ * issues those sends itself. */
 ctrl_socket_t *ctrl_socket_create(struct event_base *eb, const char *addr, int port,
-                                  mqvpn_server_t *server);
+                                  mqvpn_server_t *server, ctrl_rx_stats_fn rx_stats,
+                                  void *rx_ctx);
 
 void ctrl_socket_destroy(ctrl_socket_t *cs);
 

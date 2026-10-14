@@ -80,6 +80,46 @@ const latestAggregate = computed(() => {
 
 ![ハイブリッド TCP レーン — WLB スケジューラ](/img/bench-hybrid-wlb.png)
 
+**非対称パス** — 同じベンチを非対称 A = 300 Mbit / 10 ms + B = 80 Mbit / 30 ms（集約 380 Mbps）で実施。ハイブリッド ON は非対称パスでも集約を飽和させ、<code>-P ≥ 2</code> で **350–357 Mbps**（380 Mbps の約 93 %）に到達します。一方、生のマルチパスはここでは追いつききれません。WLB はパス間の並べ替えペナルティ（RTT 20 ms と 60 ms の差）により 16 ストリームでも 330 Mbps で頭打ちになり、MinRTT は cwnd が詰まったときしか遅い側へあふれない設計のため、ほぼ高速パス単独（~275 Mbps）に留まります。そのため対称構成と異なり、レーンの利得は全ストリーム数で持続します：MinRTT **+29–35 %**、WLB **+26 %**（<code>-P 1</code>）→ **+7 %**（<code>-P 16</code>）。
+
+![ハイブリッド TCP レーン（非対称パス）— MinRTT スケジューラ](/img/bench-hybrid-asym-minrtt.png)
+
+![ハイブリッド TCP レーン（非対称パス）— WLB スケジューラ](/img/bench-hybrid-asym-wlb.png)
+
+## SRT ライブ配信
+
+<p class="section-desc">エミュレートした劣悪回線（netns）上の SRT 伝送。mqvpn はデフォルト設定（WLB スケジューラ、BBR v2）+ SRT 受信側 <code>lossmaxttl=32</code>。</p>
+
+弱い回線・ロスの多い回線でも、2 本束ねることで視聴に耐えない SRT 配信が安定します。以下は各アップリンクが 6 Mbit しか出ない環境に 8 Mbps の FHD 配信を流した比較 — 単一回線（左）と、同じ 2 回線を mqvpn で束ねた場合（右）：
+
+<video controls muted playsinline style="width: 100%; border-radius: 8px;" src="https://github.com/user-attachments/assets/9862b717-a00f-4faf-a098-0e10d912b8a5"></video>
+
+| シナリオ | 単一回線（direct） | mqvpn（2 パス） |
+|---|---|---|
+| 帯域不足（8 Mbps FHD を 2 × 6 Mbit で） | VMAF 8.6、フリーズ 1.2 秒 | VMAF **87.7**、フリーズ 0 秒 |
+| 単一回線では収まらないレート（120 Mbps を 2 × 100 Mbit で） | ストリームロス 31.5 % | ストリームロス **0.06 %** |
+| デュアルセルラー（40 + 30 Mbit のロスあり回線に 42 Mbps） | ストリームロス 20–40 % | ストリームロス **0.9 %** |
+
+<p class="section-desc">VMAF：体感画質スコア（0–100、高いほど良い）。</p>
+
+フルレポートと比較動画: [`bench_results/srt/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/srt)
+
+## RTMP ライブ配信
+
+<p class="section-desc">エミュレートした劣悪回線（netns）上の RTMP 配信。mqvpn のハイブリッド TCP レーン経由。配信ソフトは OBS 相当の挙動（10 秒で切断検知、2 秒間隔で再接続）。</p>
+
+RTMP は単一の TCP 接続で送るプロトコルで、それ自体では回線を束ねられません。mqvpn を通すと、配信ソフトも配信先も無改造のまま透過的にボンディングされます。以下は配信中に 2 本のうち 1 本を 30 秒間遮断した比較 — 単一回線（左）は約 33 秒停止し、mqvpn（右）は止まりません：
+
+<video controls muted playsinline style="width: 100%; border-radius: 8px;" src="https://github.com/user-attachments/assets/04d3b4f9-be82-4a85-857d-474e503bfa94"></video>
+
+| シナリオ | 単一回線（direct） | mqvpn（2 パス） |
+|---|---|---|
+| 帯域不足（8 Mbps を 2 × 6 Mbit で） | 5.7 Mbps 止まり、ライブから遅れ続ける | **7.8 Mbps、遅れなし** |
+| バースト損失（モバイル回線相当） | 切断を繰り返し、ほぼ届かない | **安定、切断なし** |
+| 片方の回線を 30 秒遮断 | 配信も切断、回線復旧まで停止 | **配信は切れない** |
+
+数値の詳細はフルレポート: [RTMP ボンディング測定レポート（英語）](https://github.com/mp0rta/mqvpn/blob/main/docs/report/2026-08-11-rtmp-direct-vs-mqvpn-bonding-en.md) — データと動画: [`bench_results/rtmp/`](https://github.com/mp0rta/mqvpn/tree/main/bench_results/rtmp)
+
 <style scoped>
 .page-desc {
   font-size: 0.9em;

@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: mqvpn
-  text: オープン標準上に構築されたモダンなマルチパス VPN
+  text: Modern multipath VPN built on open standards
   image:
     light: /img/mqvpn-lockup-violet.svg
     dark: /img/mqvpn-lockup-violet-dark.svg
@@ -22,7 +22,7 @@ features:
     details: パスの切り替わりにも接続を維持しながら、複数パスを束ねて安定性の向上と帯域の有効活用を実現します。
   - icon: 🖥️
     title: マルチプラットフォーム
-    details: Linux（クライアント・サーバー）、Windows（クライアント）、macOS（クライアント）、Android/Kotlin に対応。
+    details: Linux（クライアント・サーバー）、Windows（クライアント）、macOS（クライアント）、Android/Kotlin、iOS（開発中）に対応。
   - icon: 🏗️
     title: QUIC + MASQUE ベース
     details: オープンなインターネット標準上に構築された、モダンな VPN アーキテクチャ。

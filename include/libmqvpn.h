@@ -1116,6 +1116,14 @@ MQVPN_API int mqvpn_server_get_n_clients(const mqvpn_server_t *server);
 MQVPN_API int mqvpn_server_add_user(mqvpn_server_t *server, const char *username,
                                     const char *key);
 
+/* Like mqvpn_server_add_user, with an optional fixed tunnel IPv4 for the user; ip as in
+ * mqvpn_config_add_user_ip, and it must also be a client address of the server's pool
+ * (else MQVPN_ERR_INVALID_ARG, nothing changed). ip == NULL on an existing user changes
+ * only the key. When the user's address changes, its live sessions are closed so they
+ * reconnect, and a session of another user holding the new address is closed too. */
+MQVPN_API int mqvpn_server_add_user_ip(mqvpn_server_t *server, const char *username,
+                                       const char *key, const char *ip);
+
 MQVPN_API int mqvpn_server_remove_user(mqvpn_server_t *server, const char *username);
 
 /* Fill names[0..max-1] with current user names. Returns the count. */

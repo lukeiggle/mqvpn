@@ -1199,7 +1199,11 @@ mqvpn_config_load_json_filecfg(mqvpn_file_config_t *cfg, const char *json_text)
     }
 
     v = json_find_key(json_text, "users");
-    if (v && json_read_users(cfg, v) < 0) return -1;
+    if (v && json_read_users(cfg, v) < 0) {
+        LOG_ERR("JSON: invalid \"users\" entry (malformed, name of 64 bytes or more, "
+                "or ip not an IPv4 address)");
+        return -1;
+    }
 
     v = json_find_key(json_text, "reorder_rules");
     if (v && json_read_reorder_rules(cfg, v) < 0) return -1;

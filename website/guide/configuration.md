@@ -477,6 +477,14 @@ Add a user:
 echo '{"cmd":"add_user","name":"carol","key":"carol-secret"}' | nc 127.0.0.1 9090
 ```
 
+To give the user a fixed VPN address, add `"ip"` (it must be inside the server's VPN subnet):
+
+```bash
+echo '{"cmd":"add_user","name":"carol","key":"carol-secret","ip":"10.0.0.10"}' | nc 127.0.0.1 9090
+```
+
+If you leave out `ip` for a user that already has a fixed address, the address is kept and only the key changes.
+
 Remove a user:
 
 ```bash

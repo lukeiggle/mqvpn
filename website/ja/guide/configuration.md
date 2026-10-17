@@ -469,6 +469,14 @@ CLI フラグ（`--control-port`, `--control-addr`）は設定ファイルの値
 echo '{"cmd":"add_user","name":"carol","key":"carol-secret"}' | nc 127.0.0.1 9090
 ```
 
+ユーザーに固定の VPN アドレスを割り当てるには `"ip"` を追加します（サーバーの VPN サブネット内のアドレスにしてください）：
+
+```bash
+echo '{"cmd":"add_user","name":"carol","key":"carol-secret","ip":"10.0.0.10"}' | nc 127.0.0.1 9090
+```
+
+固定アドレスを持つ既存ユーザーに対して `ip` を省略すると、アドレスはそのままで鍵だけが更新されます。
+
 ユーザーの削除：
 
 ```bash

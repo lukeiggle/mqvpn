@@ -3278,6 +3278,13 @@ mqvpn_server_get_client_sched(const mqvpn_server_t *s, mqvpn_internal_client_sch
         if (!conn || !conn->tunnel_established) continue;
         snprintf(out[count].scheduler, sizeof(out[count].scheduler), "%s",
                  mqvpn_sched_to_name(conn->eff_sched));
+        out[count].vpn_ip[0] = out[count].vpn_ip6[0] = '\0';
+        if (conn->assigned_ip.s_addr)
+            inet_ntop(AF_INET, &conn->assigned_ip, out[count].vpn_ip,
+                      sizeof(out[count].vpn_ip));
+        if (conn->has_v6)
+            inet_ntop(AF_INET6, &conn->assigned_ip6, out[count].vpn_ip6,
+                      sizeof(out[count].vpn_ip6));
         count++;
     }
     return count;

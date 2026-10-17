@@ -314,10 +314,13 @@ MQVPN_INTERNAL int mqvpn_server_get_client_reinject(const mqvpn_server_t *s,
                                                     mqvpn_internal_client_reinject_t *out,
                                                     int max);
 
-/* Per-client effective downlink scheduler name, for get_status. Side
- * channel like the reinject snapshot: mqvpn_client_info_t is unchanged. */
+/* Per-client values that are not in the public mqvpn_client_info_t, for
+ * get_status. Side channel like the reinject snapshot. vpn_ip / vpn_ip6 are
+ * "" when absent. */
 typedef struct {
     char scheduler[16];
+    char vpn_ip[16];
+    char vpn_ip6[46];
 } mqvpn_internal_client_sched_t;
 
 /* Same session-iteration order and tunnel_established guard as

@@ -261,8 +261,9 @@ json_read_string_array(const char *p, char out[][64], int max_items, int *n_item
 }
 
 static int
-json_add_user_cb(void *ctx, const char *name, const char *key)
+json_add_user_cb(void *ctx, const char *name, const char *key, const char *ip)
 {
+    (void)ip; /* fixed IPs are wired in with the file-config support */
     /* add_user_entry() logs and skips invalid/duplicate/overflow entries
      * rather than failing the whole parse; preserve that here. */
     add_user_entry((mqvpn_file_config_t *)ctx, name, key, 0, "json");

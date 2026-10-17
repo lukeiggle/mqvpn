@@ -10,6 +10,7 @@
 #include "config.h"
 #include "libmqvpn.h" /* MQVPN_RECV_RATE_LIMIT_MAX */
 #include "mqvpn_sched_names.h"
+#include "json_mini.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2174,6 +2175,36 @@ test_ini_json_invalid_scalar_parity(void)
                   "invalid hybrid tcp json falls back to auto");
 }
 
+static void
+test_user_spec_split(void)
+{
+    static const struct {
+        const char *in;
+        int rc;
+        const char *name, *key, *ip;
+    } t[] = {
+        {"alice:k", 0, "alice", "k", NULL},
+        {"alice:k:10.0.0.10", 0, "alice", "k", "10.0.0.10"},
+        {"alice:a:b", 0, "alice", "a:b", NULL},
+        {"alice:a:b:10.0.0.10", 0, "alice", "a:b", "10.0.0.10"},
+        {"alice::10.0.0.10", 0, "alice", ":10.0.0.10", NULL},
+        {"alice:10.0.0.10", 0, "alice", "10.0.0.10", NULL},
+        {"alice:k:10.0.0.256", 0, "alice", "k:10.0.0.256", NULL},
+        {"alice", -1, NULL, NULL, NULL},
+        {":k", -1, NULL, NULL, NULL},
+        {"alice:", -1, NULL, NULL, NULL},
+    };
+    for (size_t i = 0; i < sizeof(t) / sizeof(t[0]); i++) {
+        char buf[64], *n = NULL, *k = NULL, *ip = NULL;
+        snprintf(buf, sizeof(buf), "%s", t[i].in);
+        ASSERT_EQ_INT(mqvpn_user_spec_split(buf, &n, &k, &ip), t[i].rc, t[i].in);
+        if (t[i].rc != 0) continue;
+        ASSERT_EQ_STR(n, t[i].name, t[i].in);
+        ASSERT_EQ_STR(k, t[i].key, t[i].in);
+        ASSERT_TRUE(t[i].ip ? (ip && strcmp(ip, t[i].ip) == 0) : ip == NULL, t[i].in);
+    }
+}
+
 /* Table-driven round-trip test over MQVPN_SCHED_LIST / MQVPN_CC_LIST
  * (src/mqvpn_sched_names.h): every row must survive from_name(name) ==
  * enum and to_name(enum) == name. This is the mechanical parity check the
@@ -2219,6 +2250,7 @@ int
 main(void)
 {
     test_defaults();
+    test_user_spec_split();
     test_parse_server_config();
     test_parse_client_config();
     test_parse_scheduler_backup_fec();

@@ -89,6 +89,8 @@ struct mqvpn_config_s {
     char auth_key[256];
     char user_names[MQVPN_MAX_USERS][64];
     char user_keys[MQVPN_MAX_USERS][256];
+    uint32_t user_ip4[MQVPN_MAX_USERS]; /* fixed tunnel IPv4, network order; 0 = from the
+                                           pool */
     int n_users;
     int insecure;
 

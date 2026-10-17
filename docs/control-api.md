@@ -135,15 +135,15 @@ name already exists, the key is updated in place.
 - `"add_user failed (-N)"` — the underlying library call returned error code
   `-N`; check server logs for details. An `ip` outside the server's subnet,
   the server's own address, or another user's fixed address returns
-  `add_user failed (-1)`.
+  `add_user failed (-1)`, as does an `ip` that is not a valid IPv4 address (for
+  example `"abc"`, `""` or `"0.0.0.0"`).
 
 ---
 
 ### 5.2 `remove_user`
 
-Remove a user from the auth table. Does not forcibly disconnect an active
-session; the session expires naturally after authentication fails on the next
-reconnect. Removing a user also frees its fixed address (§5.1 `ip`).
+Remove a user from the auth table. Closes the user's active
+sessions (the connection is closed right away). Removing a user also frees its fixed address (§5.1 `ip`).
 
 **Request**
 
@@ -555,6 +555,9 @@ mqvpn follows semantic versioning for the control API:
   UDP GRO is configured and un-coalesced entirely in the platform layer, which
   the library never observes, so those two are read straight from the platform
   by the control socket (`ctrl_socket_create`) instead.
+- `add_user` now refuses a `name` of 64 bytes or more with
+  `name longer than 63 bytes`; it used to be truncated to 63 bytes and
+  accepted. Changed in v0.18.0.
 - `add_user` gained the optional request field `ip` in v0.18.0. Additive;
   requests without it behave as before.
 - `get_status` client objects gained `vpn_ip` and `vpn_ip6` in v0.18.0 (JSON

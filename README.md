@@ -709,7 +709,7 @@ mqvpn [--config PATH] --mode client|server [options]
   --server IP:PORT       Server address (client)
   --path IFACE           Multipath interface (repeatable)
   --auth-key KEY         PSK authentication
-  --user NAME:KEY        Add server user credential (repeatable)
+  --user NAME:KEY[:IP]   Add server user credential; IP fixes the user's VPN address (repeatable)
   --dns ADDR             DNS server (repeatable)
   --insecure             Accept untrusted certs (testing only)
   --listen BIND:PORT     Listen address (server, default: 0.0.0.0:443)

@@ -129,6 +129,8 @@ The server can authenticate multiple users, each with their own PSK. In JSON con
 
 When both `auth_key` (global key) and `users` are set, clients can authenticate with either. To restrict access to named users only, remove `auth_key` from the config.
 
+To give a user the same VPN address every time, add the address: `User = alice:KEY:10.0.0.10` (INI), `"ip": "10.0.0.10"` in the user's object or `"alice:KEY:10.0.0.10"` (JSON), or `--user alice:KEY:10.0.0.10`. The address must be inside `Subnet` and not the server's own address (the first one); two users cannot share one. Nobody else gets that address, even while the user is offline. If the user connects again while an old connection is still open, the new connection gets the address and the old one is closed. If the user also has an IPv6 address, it stays the same too. Added in v0.18.0.
+
 Removing a user via the Control API also disconnects any active sessions authenticated with that username.
 
 ::: warning Monitoring requires per-user keys
@@ -186,7 +188,7 @@ sudo mqvpn --config /etc/mqvpn/server.json
 | Key | Description | Default |
 |-----|-------------|---------|
 | `Key` | Pre-shared key (base64, generate with `mqvpn --genkey`) | Required unless `User` is set |
-| `User` | Per-user PSK in `NAME:KEY` format (repeatable) | — |
+| `User` | Per-user PSK in `NAME:KEY` or `NAME:KEY:IP` format (repeatable). IP gives the user a fixed VPN address. | — |
 | `MaxClients` | Maximum concurrent clients (server only) | `64` |
 
 In JSON, use `auth_key` on both client and server (as in the examples above).

@@ -1124,6 +1124,111 @@ test_auth_users_ini(void)
 }
 
 static void
+test_auth_users_key_update_keeps_ip(void)
+{
+    const char *ini = "[Auth]\n"
+                      "User = alice:k1:10.0.0.10\n"
+                      "User = alice:k2\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+
+    ASSERT_EQ_INT(rc, 0, "key update parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 1, "one user");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k2", "key updated");
+    ASSERT_EQ_STR(cfg.user_ips[0], "10.0.0.10", "ip kept on key-only update");
+}
+
+static void
+check_fixed_ip_users(const mqvpn_file_config_t *cfg, const char *what)
+{
+    static const char *names[] = {"alice", "bob", "carol", "dave"};
+    static const char *keys[] = {"ka", "kb", "a:b", "a:b"};
+    static const char *ips[] = {"10.0.0.10", "", "", "10.0.0.11"};
+    ASSERT_EQ_INT(cfg->n_users, 4, what);
+    for (int i = 0; i < 4 && i < cfg->n_users; i++) {
+        ASSERT_EQ_STR(cfg->user_names[i], names[i], what);
+        ASSERT_EQ_STR(cfg->user_keys[i], keys[i], what);
+        ASSERT_EQ_STR(cfg->user_ips[i], ips[i], what);
+    }
+}
+
+static void
+test_auth_users_fixed_ip_ini(void)
+{
+    const char *ini = "[Auth]\n"
+                      "User = alice:ka:10.0.0.10\n"
+                      "User = bob:kb\n"
+                      "User = carol:a:b\n"
+                      "User = dave:a:b:10.0.0.11\n";
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "fixed ip ini parse ok");
+    check_fixed_ip_users(&cfg, "fixed ip ini");
+}
+
+static void
+test_auth_users_fixed_ip_json(void)
+{
+    const char *json = "{\"users\":[{\"name\":\"alice\",\"key\":\"ka\","
+                       "\"ip\":\"10.0.0.10\"},\"bob:kb\",\"carol:a:b\","
+                       "{\"name\":\"dave\",\"key\":\"a:b\",\"ip\":\"10.0.0.11\"}]}";
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load_json_filecfg(&cfg, json);
+    ASSERT_EQ_INT(rc, 0, "fixed ip json parse ok");
+    check_fixed_ip_users(&cfg, "fixed ip json");
+}
+
+static void
+test_auth_users_fixed_ip_json_invalid(void)
+{
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[{\"name\":\"a\",\"key\":\"k\","
+                                             "\"ip\":\"10.0.0.300\"}]}"),
+        -1, "out-of-range ip rejected");
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(
+        mqvpn_config_load_json_filecfg(&cfg, "{\"users\":[{\"name\":\"a\",\"key\":\"k\","
+                                             "\"ip\":\"255.255.255.255junk\"}]}"),
+        -1, "ip with trailing junk rejected");
+}
+
+static void
+test_auth_users_long_name_ini(void)
+{
+    char p63[64];
+    memset(p63, 'P', 63);
+    p63[63] = '\0';
+    char ini[512];
+    snprintf(ini, sizeof(ini), "[Auth]\nUser = %s:k1:10.0.0.10\nUser = %sx:k2\n", p63,
+             p63);
+    char *path = write_tmp(ini);
+    mqvpn_file_config_t cfg;
+    mqvpn_config_defaults(&cfg);
+    int rc = mqvpn_config_load(&cfg, path);
+    unlink(path);
+    ASSERT_EQ_INT(rc, 0, "long name ini parse ok");
+    ASSERT_EQ_INT(cfg.n_users, 1, "64-byte name ignored");
+    ASSERT_EQ_STR(cfg.user_keys[0], "k1", "first user key kept");
+    ASSERT_EQ_STR(cfg.user_ips[0], "10.0.0.10", "first user ip kept");
+
+    char json[512];
+    snprintf(json, sizeof(json), "{\"users\":[\"%s:k1:10.0.0.10\",\"%sx:k2\"]}", p63,
+             p63);
+    mqvpn_config_defaults(&cfg);
+    ASSERT_EQ_INT(mqvpn_config_load_json_filecfg(&cfg, json), -1,
+                  "64-byte name fails json load");
+}
+
+static void
 test_auth_users_ini_invalid_ignored(void)
 {
     const char *ini = "[Interface]\n"
@@ -2314,6 +2419,11 @@ main(void)
     test_subnet6_not_set();
     test_subnet6_duplicate_last_wins();
     test_auth_users_ini();
+    test_auth_users_key_update_keeps_ip();
+    test_auth_users_fixed_ip_ini();
+    test_auth_users_fixed_ip_json();
+    test_auth_users_fixed_ip_json_invalid();
+    test_auth_users_long_name_ini();
     test_auth_users_ini_invalid_ignored();
     test_json_config_load();
     test_json_client_config_load();

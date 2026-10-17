@@ -156,6 +156,9 @@ TEST(config_add_user_ip_rejects)
         ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "carol", "kc", bad[i]),
                   MQVPN_ERR_INVALID_ARG);
     ASSERT_EQ(mqvpn_config_remove_user(cfg, "carol"), MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "(global)", "kg", "10.0.0.10"),
+              MQVPN_ERR_INVALID_ARG);
+    ASSERT_EQ(mqvpn_config_add_user_ip(cfg, "(global)", "kg", NULL), MQVPN_OK);
     mqvpn_config_free(cfg);
 }
 

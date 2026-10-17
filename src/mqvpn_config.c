@@ -229,6 +229,8 @@ mqvpn_config_add_user_ip(mqvpn_config_t *cfg, const char *username, const char *
         if (inet_pton(AF_INET, ip, &a) != 1 || a.s_addr == 0)
             return MQVPN_ERR_INVALID_ARG;
         ip4 = a.s_addr;
+        /* Global-key logins are named "(global)"; that name must not own an address. */
+        if (strcmp(username, "(global)") == 0) return MQVPN_ERR_INVALID_ARG;
     }
 
     int idx = -1;

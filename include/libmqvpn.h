@@ -648,7 +648,8 @@ MQVPN_API int mqvpn_config_add_user(mqvpn_config_t *cfg, const char *username,
                                     const char *key);
 /* Like mqvpn_config_add_user, with an optional fixed tunnel IPv4 ("a.b.c.d") for the
  * user. ip == NULL keeps an existing user's address (a new user gets none). An invalid
- * address, 0.0.0.0, one already held by another user, or a name of 64 bytes or more
+ * address, 0.0.0.0, one already held by another user, an address for the name
+ * "(global)" (the identity of global-key logins), or a name of 64 bytes or more
  * returns MQVPN_ERR_INVALID_ARG and changes nothing. */
 MQVPN_API int mqvpn_config_add_user_ip(mqvpn_config_t *cfg, const char *username,
                                        const char *key, const char *ip);

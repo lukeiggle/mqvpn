@@ -1641,7 +1641,7 @@ test_phase_j_fixed_ip() {
     local alice2_log="${LOG_DIR}/phase_j_alice2.log"
     local bob_log="${LOG_DIR}/phase_j_bob.log"
     local carol_log="${LOG_DIR}/phase_j_carol.log"
-    local out got rc
+    local out got rc n
 
     # Step 1: fresh netns, alice reserved, bob dynamic.
     bench_cleanup
@@ -1650,6 +1650,7 @@ test_phase_j_fixed_ip() {
         --auth-key "$_BENCH_PSK" --control-port "$CTRL_PORT" \
         --user alice:secret_a:10.0.0.50 --user bob:secret_b \
         || { echo "  server failed to start"; return 1; }
+    # Mirrors the argument list in start_server_with_flags.
     local -a srv_base=(--mode server --listen "0.0.0.0:${VPN_LISTEN_PORT}"
         --subnet 10.0.0.0/24 --cert "$_BENCH_WORK_DIR/server.crt"
         --key "$_BENCH_WORK_DIR/server.key" --log-level "$BENCH_LOG_LEVEL"
@@ -1709,7 +1710,18 @@ test_phase_j_fixed_ip() {
     _phase_j_expect_ip carol 10.0.0.60 || return 1
     _phase_j_add_user true '{"cmd":"add_user","name":"carol","key":"secret_c"}' || return 1
     sleep 3
-    _phase_j_expect_ip carol 10.0.0.60 || return 1
+    # No waiting: the client auto-reconnects, so a polled check would hide a cut session.
+    if ! _phase_j_user_ip_is carol 10.0.0.60; then
+        echo "  J.5 carol after key-only add_user: got '$(_phase_j_status carol)', want '1 10.0.0.60'"
+        return 1
+    fi
+    n=$(awk '/ADDRESS_ASSIGN: IPv4/{c++} END{print c+0}' "$carol_log")
+    if [[ "$n" != "1" ]]; then
+        echo "  J.5 carol saw $n ADDRESS_ASSIGN lines (session was cut?); tail:"
+        tail -15 "$carol_log"
+        return 1
+    fi
+    echo "  J.5 key-only add_user kept the session (1 ADDRESS_ASSIGN): OK"
     _phase_i_stop_client
 
     # Step 6: a reservation outside the pool refuses to start the server.
@@ -1725,8 +1737,8 @@ test_phase_j_fixed_ip() {
         fi
     fi
     wait "$_BENCH_SERVER_PID" 2>/dev/null || rc=$?
-    if (( rc == 0 )); then
-        echo "  J.6 server exited with status 0, want non-zero"
+    if (( rc == 0 || rc == 127 )); then
+        echo "  J.6 server exit status $rc (0 = clean exit, 127 = not our child), want a real failure"
         return 1
     fi
     _phase_j_log_has "${LOG_DIR}/phase_j_server_6.log" 'fixed IP 10\.0\.1\.5 is not a free client address' "J.6 server log" || return 1
@@ -1768,7 +1780,7 @@ maybe_run "phase_e restart resilience"             E test_phase_e_restart
 maybe_run "phase_f scheduler matrix smoke"         F test_phase_f_scheduler_smoke
 maybe_run "phase_h new commands (build_info + extended get_stats + fec_stats + all_fec_stats)" H test_phase_h_new_commands
 maybe_run "phase_i per-user scheduler"            I test_phase_i_client_scheduler
-maybe_run "phase_j fixed user IP"                    J test_phase_j_fixed_ip
+maybe_run "phase_j fixed user IP"                 J test_phase_j_fixed_ip
 maybe_run "phase_g INI-driven control-API config"  G test_phase_g_ini_config   # must be LAST
 
 echo ""

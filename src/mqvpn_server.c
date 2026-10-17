@@ -2226,15 +2226,6 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
         }
     }
 
-    /* Startup advisory, not a refusal: a pool wider than /24 is legal
-     * (addr_pool.c allows prefix_len in [16,30]) and plenty of deployments
-     * never use intra-VPN client-to-client TCP. But the client widens its
-     * assigned /32 to /24 for the tunnel-subnet RAW gate, and the server's
-     * egress ACL denies the full pool subnet, so two clients outside a
-     * shared /24 within a wider pool get their hybrid TCP-lane traffic
-     * silently, permanently RST'd. Warn once at startup so operators with a
-     * wide pool + hybrid enabled know to either narrow the pool to /24 (or
-     * smaller) or add an explicit EgressAllow for the pool subnet. */
     for (int i = 0; i < s->config.n_users; i++) {
         if (!s->config.user_ip4[i]) continue;
         struct in_addr ua = {.s_addr = s->config.user_ip4[i]};
@@ -2248,6 +2239,15 @@ mqvpn_server_new(const mqvpn_config_t *cfg, const mqvpn_server_callbacks_t *cbs,
     }
     svr_warn_shared_keys(s);
 
+    /* Startup advisory, not a refusal: a pool wider than /24 is legal
+     * (addr_pool.c allows prefix_len in [16,30]) and plenty of deployments
+     * never use intra-VPN client-to-client TCP. But the client widens its
+     * assigned /32 to /24 for the tunnel-subnet RAW gate, and the server's
+     * egress ACL denies the full pool subnet, so two clients outside a
+     * shared /24 within a wider pool get their hybrid TCP-lane traffic
+     * silently, permanently RST'd. Warn once at startup so operators with a
+     * wide pool + hybrid enabled know to either narrow the pool to /24 (or
+     * smaller) or add an explicit EgressAllow for the pool subnet. */
     if (s->config.hybrid.enabled && s->pool.prefix_len < 24) {
         LOG_W(s,
               "hybrid TCP-lane: pool subnet is wider than /24 (prefix_len=%u) — "

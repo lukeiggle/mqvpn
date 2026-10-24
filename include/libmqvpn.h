@@ -467,6 +467,45 @@ typedef struct {
      * control API reports them from there (see ctrl_socket_create). */
     uint64_t udp_tx_sends;
     uint64_t udp_tx_datagrams;
+
+    /* TCP-lane stream resets and what each left undelivered. A stream reset
+     * discards the data the transport still holds for that stream, so a
+     * reset that follows data can truncate it. All counters; all 0 without
+     * hybrid mode. Appended under ABI 3.
+     *
+     * Server: resets the server issued after a relay I/O error on the egress
+     * socket, split by cause: tcp_reset_econnreset (the origin reset the
+     * connection) and tcp_reset_error (any other error). *_tail_flows counts
+     * those resets that left origin bytes behind, *_tail_bytes sums them.
+     * The tail is an estimate, since the transport exposes no per-stream
+     * acknowledged offset: the bytes the stream accepted within one second
+     * before the reset, plus bytes read from the origin that it had not yet
+     * accepted. Always 0 client-side.
+     *
+     * tcp_idle_evicted: flows closed by the [Hybrid] TcpIdleTimeoutSec sweep,
+     * on either side. They move no bytes for the whole timeout, so they lose
+     * nothing; counted apart so they are never mistaken for the above.
+     *
+     * Client: tcp_reset_by_peer counts lane flows torn down because the
+     * server reset the stream. Of those, *_uplink_flows/_bytes are the ones
+     * holding bytes the local host had sent and lwIP had acknowledged but
+     * that had not reached the stream yet, and *_downlink_flows/_bytes the
+     * ones holding bytes received from the stream that the local host had
+     * not acknowledged yet (lwIP's send queue plus the lane's own retry
+     * stash). Bytes the transport itself discarded are not visible here.
+     * Always 0 server-side. */
+    uint64_t tcp_reset_econnreset;
+    uint64_t tcp_reset_econnreset_tail_flows;
+    uint64_t tcp_reset_econnreset_tail_bytes;
+    uint64_t tcp_reset_error;
+    uint64_t tcp_reset_error_tail_flows;
+    uint64_t tcp_reset_error_tail_bytes;
+    uint64_t tcp_idle_evicted;
+    uint64_t tcp_reset_by_peer;
+    uint64_t tcp_reset_by_peer_uplink_flows;
+    uint64_t tcp_reset_by_peer_uplink_bytes;
+    uint64_t tcp_reset_by_peer_downlink_flows;
+    uint64_t tcp_reset_by_peer_downlink_bytes;
 } mqvpn_stats_t;
 
 typedef struct {

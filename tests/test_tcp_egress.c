@@ -2313,6 +2313,66 @@ TEST(mqvpn_tcp_uplink_backlog_stops_at_unsent_cap)
     free(h.probe.raw_recv_buf);
 }
 
+/* An origin that sends data and then resets (SO_LINGER{1,0}) makes the
+ * server's recv() fail with ECONNRESET and reset the stream. That reset is
+ * counted under its cause, and the bytes the stream accepted just before it
+ * are counted as its tail: they may still be unacknowledged when the reset
+ * drops them. Nothing else may move: no idle eviction, no other error. */
+TEST(mqvpn_tcp_origin_reset_counts_tail)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/1), 0);
+
+    char path[64];
+    snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
+
+    harness_t h;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
+              0);
+    h.probe.path = path;
+    h.probe.raw_capture = 1;
+
+    harness_pump(&h, &h.probe.handshake_done, 10000);
+    ASSERT_EQ(h.probe.handshake_done, 1);
+    ASSERT_EQ(probe_open_request_with_body(&h.probe), 0);
+    harness_pump_with_sink(&h, &sink, &h.probe.response_done, 10000);
+    ASSERT_EQ(h.probe.response_done, 1);
+    ASSERT_STREQ(h.probe.status, "200");
+
+    const char *msg = "response then reset";
+    size_t msg_len = strlen(msg);
+    ASSERT_EQ(probe_send_body_retry(&h, &h.probe, (const uint8_t *)msg, msg_len, 500), 0);
+    int got_echo = 0;
+    for (int i = 0; i < 500 && !got_echo; i++) {
+        int never = 0;
+        harness_pump_with_sink(&h, &sink, &never, 20);
+        got_echo = h.probe.raw_recv_len >= msg_len;
+    }
+    ASSERT_EQ(got_echo, 1);
+
+    struct linger lg = {.l_onoff = 1, .l_linger = 0};
+    ASSERT_EQ(setsockopt(sink.conn_fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)), 0);
+    close(sink.conn_fd);
+    sink.conn_fd = -1;
+    harness_pump(&h, &h.probe.request_closed, 5000);
+    ASSERT_EQ(h.probe.request_closed, 1);
+
+    mqvpn_stats_t st;
+    memset(&st, 0, sizeof(st));
+    ASSERT_EQ(mqvpn_server_get_stats(h.svr, &st), MQVPN_OK);
+    ASSERT_EQ(st.tcp_reset_econnreset, 1);
+    ASSERT_EQ(st.tcp_reset_econnreset_tail_flows, 1);
+    ASSERT_EQ(st.tcp_reset_econnreset_tail_bytes, msg_len);
+    ASSERT_EQ(st.tcp_reset_error, 0);
+    ASSERT_EQ(st.tcp_reset_error_tail_flows, 0);
+    ASSERT_EQ(st.tcp_reset_error_tail_bytes, 0);
+    ASSERT_EQ(st.tcp_idle_evicted, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
 /* Closing-notify idempotency. (Uplink -XQC_EAGAIN coverage note: the
  * stash-WRITE half of that path — send_body backpressure parking the flow
  * via svr_tcp_egress_stash_uplink — IS exercised by
@@ -2427,6 +2487,16 @@ TEST(mqvpn_tcp_active_idle_timeout_evicts)
     }
     ASSERT_EQ(h.probe.request_closed, 1);
     ASSERT_EQ(sink.eof_seen, 1);
+
+    /* Counted as an idle eviction, never as a relay error. */
+    {
+        mqvpn_stats_t st;
+        memset(&st, 0, sizeof(st));
+        ASSERT_EQ(mqvpn_server_get_stats(h.svr, &st), MQVPN_OK);
+        ASSERT_EQ(st.tcp_idle_evicted, 1);
+        ASSERT_EQ(st.tcp_reset_econnreset, 0);
+        ASSERT_EQ(st.tcp_reset_error, 0);
+    }
 
     /* Regression, same shape as the connect-timeout/global-cap tests: the
      * evicted flow's counters must not be stuck elevated — a fresh
@@ -3263,6 +3333,7 @@ main(void)
     run_mqvpn_tcp_downlink_backpressure_pause_resume();
     run_mqvpn_tcp_relay_error_stops_fd_dispatch();
     run_mqvpn_tcp_uplink_backlog_stops_at_unsent_cap();
+    run_mqvpn_tcp_origin_reset_counts_tail();
     run_mqvpn_tcp_closing_notify_idempotent();
     run_mqvpn_tcp_active_idle_timeout_evicts();
     run_mqvpn_tcp_two_flow_same_conn_idle_eviction();

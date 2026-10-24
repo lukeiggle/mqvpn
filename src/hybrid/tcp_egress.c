@@ -96,6 +96,15 @@ _Static_assert(TCP_EGRESS_RELAY_BUDGET >= TCP_EGRESS_RELAY_CHUNK &&
                    TCP_EGRESS_RELAY_BUDGET % TCP_EGRESS_RELAY_CHUNK == 0,
                "relay budget must be a whole number of relay chunks");
 
+/* Reset-tail estimate (svr_tcp_reset_counters_t, mqvpn_server_internal.h):
+ * the bytes send_body() accepted in the last TCP_EGRESS_TAIL_WINDOW_US,
+ * kept per flow as TCP_EGRESS_TAIL_SLOTS fixed time slots. A slot is
+ * attributed whole, so the window actually summed is between
+ * (SLOTS - 1) and SLOTS slot widths. */
+#define TCP_EGRESS_TAIL_SLOTS     4
+#define TCP_EGRESS_TAIL_WINDOW_US 1000000ULL
+#define TCP_EGRESS_TAIL_SLOT_US   (TCP_EGRESS_TAIL_WINDOW_US / TCP_EGRESS_TAIL_SLOTS)
+
 int
 svr_tcp_egress_parse_path(const char *path, size_t path_len, char *out_host,
                           size_t out_host_cap, uint16_t *out_port)
@@ -415,6 +424,11 @@ typedef struct svr_tcp_egress_flow_s {
                           * pointer identity alone is ABA-unsafe — a flow
                           * freed by the flush and a new one allocated at
                           * the same address must not pass for each other. */
+    /* Reset-tail ring (svr_tcp_egress_tail_add): bytes send_body() accepted
+     * per TCP_EGRESS_TAIL_SLOT_US slot, indexed by slot % SLOTS; tail_slot
+     * is svr_now_us() / SLOT_US of the newest one. */
+    uint64_t tail_slot;
+    uint32_t tail_bytes[TCP_EGRESS_TAIL_SLOTS];
     int uplink_fin_sent; /* send_body(NULL,0,1) succeeded — no more FIN
                           * retries needed. Until this is true and
                           * egress_eof_seen is true, cb_request_write
@@ -530,6 +544,40 @@ svr_tcp_egress_errno_to_status(int err)
     }
 }
 
+/* Record `n` bytes send_body() accepted for `ef` at `now_us` in its tail
+ * ring; slots that aged out since the last call are cleared first. */
+static void
+svr_tcp_egress_tail_add(svr_tcp_egress_flow_t *ef, uint64_t now_us, size_t n)
+{
+    uint64_t slot = now_us / TCP_EGRESS_TAIL_SLOT_US;
+    if (slot != ef->tail_slot) {
+        uint64_t gap =
+            slot > ef->tail_slot ? slot - ef->tail_slot : TCP_EGRESS_TAIL_SLOTS;
+        if (gap > TCP_EGRESS_TAIL_SLOTS) gap = TCP_EGRESS_TAIL_SLOTS;
+        for (uint64_t i = 1; i <= gap; i++)
+            ef->tail_bytes[(ef->tail_slot + i) % TCP_EGRESS_TAIL_SLOTS] = 0;
+        ef->tail_slot = slot;
+    }
+    uint32_t *b = &ef->tail_bytes[slot % TCP_EGRESS_TAIL_SLOTS];
+    *b = (n > UINT32_MAX - *b) ? UINT32_MAX : *b + (uint32_t)n;
+}
+
+/* The flow's reset tail at `now_us`: accepted bytes still inside the
+ * window plus the uplink stash (read from the origin, never accepted). */
+static uint64_t
+svr_tcp_egress_tail(const svr_tcp_egress_flow_t *ef, uint64_t now_us)
+{
+    uint64_t slot = now_us / TCP_EGRESS_TAIL_SLOT_US;
+    uint64_t sum = ef->uplink_withheld ? ef->uplink_stash_len : 0;
+    for (uint64_t i = 0; i < TCP_EGRESS_TAIL_SLOTS; i++) {
+        if (ef->tail_slot < i) break;
+        uint64_t older = ef->tail_slot - i;
+        if (older + TCP_EGRESS_TAIL_SLOTS <= slot) break; /* aged out */
+        sum += ef->tail_bytes[older % TCP_EGRESS_TAIL_SLOTS];
+    }
+    return sum;
+}
+
 /* ── Relay: the two byte-shoveling directions plus close mapping ──
  *
  * Naming (do not confuse — each side names relative to ITSELF): "downlink"
@@ -610,6 +658,21 @@ svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
         live = live->next;
     if (!live) return; /* flushed teardown already destroyed the flow */
 
+    uint64_t tail = svr_tcp_egress_tail(ef, svr_now_us());
+    svr_tcp_reset_counters_t *r = ctx.resets;
+    if (err == ECONNRESET) {
+        r->econnreset++;
+        if (tail) {
+            r->econnreset_tail_flows++;
+            r->econnreset_tail_bytes += tail;
+        }
+    } else {
+        r->other++;
+        if (tail) {
+            r->other_tail_flows++;
+            r->other_tail_bytes += tail;
+        }
+    }
     svr_tcp_egress_abort(server, ef);
 }
 
@@ -672,6 +735,9 @@ svr_tcp_egress_on_idle_evict(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                "closing stream",
                peer, ef->username, idle_timeout_sec);
     }
+    svr_tcp_egress_srv_ctx_t ctx;
+    svr_get_tcp_egress_ctx(server, &ctx);
+    ctx.resets->idle_evicted++;
     svr_tcp_egress_abort(server, ef);
 }
 
@@ -951,6 +1017,7 @@ svr_tcp_egress_on_h3_writable(mqvpn_server_t *server, void *stream)
             }
             off += (size_t)sent;
         }
+        if (off > 0) svr_tcp_egress_tail_add(ef, svr_now_us(), off);
         /* Uplink activity: guarded by off > 0 so a notify that drains
          * nothing (still fully -XQC_EAGAIN'd) does not refresh
          * last_activity_us — same "no progress, no refresh" rule as the
@@ -1267,6 +1334,7 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                 svr_tcp_egress_on_relay_error(server, ef, 0);
                 return;
             }
+            if (sent > 0) svr_tcp_egress_tail_add(ef, ef->last_activity_us, (size_t)sent);
             if ((size_t)sent < (size_t)n) {
                 /* Status legally discarded: this caller returns immediately
                  * on BOTH outcomes (paused-alive or gone), touching ef no

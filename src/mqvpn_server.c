@@ -249,6 +249,10 @@ struct mqvpn_server_s {
      * tcp_flows_total / tcp_flows_rejected. */
     uint64_t tcp_egress_flows_total_opened;
     uint64_t tcp_egress_flows_rejected_cap;
+    /* Same STORAGE-only contract: server-initiated stream resets by cause,
+     * see svr_tcp_reset_counters_t (mqvpn_server_internal.h). Surfaced as
+     * get_stats' tcp_reset_* / tcp_idle_evicted. */
+    svr_tcp_reset_counters_t tcp_egress_resets;
     struct svr_tcp_egress_flow_s *tcp_egress_flow_list_head;
 #endif
 
@@ -1573,6 +1577,7 @@ svr_get_tcp_egress_ctx(mqvpn_server_t *s, svr_tcp_egress_srv_ctx_t *out)
     out->global_fd_count = &s->tcp_egress_global_fd_count;
     out->flows_total_opened = &s->tcp_egress_flows_total_opened;
     out->flows_rejected_cap = &s->tcp_egress_flows_rejected_cap;
+    out->resets = &s->tcp_egress_resets;
     out->tcp_max_flows = s->config.hybrid.tcp_max_flows;
     out->tcp_connect_timeout_sec = s->config.hybrid.tcp_connect_timeout_sec;
     out->tcp_idle_timeout_sec = s->config.hybrid.tcp_idle_timeout_sec;
@@ -2402,6 +2407,16 @@ mqvpn_server_destroy(mqvpn_server_t *s)
      * same conn — reversing the order would turn this leak fix into a
      * heap-use-after-free on any conn that hit both contingencies at once. */
     svr_tcp_egress_destroy_all(s);
+    {
+        const svr_tcp_reset_counters_t *r = &s->tcp_egress_resets;
+        if (r->econnreset || r->other || r->idle_evicted)
+            LOG_I(s,
+                  "connect-tcp: stream resets: econnreset=%" PRIu64 " (tail %" PRIu64
+                  " flows, %" PRIu64 " bytes) error=%" PRIu64 " (tail %" PRIu64
+                  " flows, %" PRIu64 " bytes) idle_evicted=%" PRIu64,
+                  r->econnreset, r->econnreset_tail_flows, r->econnreset_tail_bytes,
+                  r->other, r->other_tail_flows, r->other_tail_bytes, r->idle_evicted);
+    }
 #endif
 
     /* The engine teardown above fired the conn-close callbacks, so a clean
@@ -2812,6 +2827,13 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->tcp_flows_active = (uint64_t)s->tcp_egress_global_fd_count;
     out->tcp_flows_total = s->tcp_egress_flows_total_opened;
     out->tcp_flows_rejected = s->tcp_egress_flows_rejected_cap;
+    out->tcp_reset_econnreset = s->tcp_egress_resets.econnreset;
+    out->tcp_reset_econnreset_tail_flows = s->tcp_egress_resets.econnreset_tail_flows;
+    out->tcp_reset_econnreset_tail_bytes = s->tcp_egress_resets.econnreset_tail_bytes;
+    out->tcp_reset_error = s->tcp_egress_resets.other;
+    out->tcp_reset_error_tail_flows = s->tcp_egress_resets.other_tail_flows;
+    out->tcp_reset_error_tail_bytes = s->tcp_egress_resets.other_tail_bytes;
+    out->tcp_idle_evicted = s->tcp_egress_resets.idle_evicted;
 #endif
     svr_tx_totals(s, &out->udp_tx_sends, &out->udp_tx_datagrams);
     return MQVPN_OK;

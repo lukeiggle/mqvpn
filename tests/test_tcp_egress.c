@@ -2487,11 +2487,23 @@ reset_hold_stats(harness_t *h, mqvpn_stats_t *st)
     ASSERT_EQ(mqvpn_server_get_stats(h->svr, st), MQVPN_OK);
 }
 
+/* harness_pump with a wall-clock budget: harness_pump counts its own poll
+ * timeouts, which run short while packets keep arriving (a bulk transfer),
+ * so its budget can lapse long before budget_ms of real time. */
+static void
+reset_hold_pump_wall(harness_t *h, const int *done, int budget_ms)
+{
+    uint64_t end = test_now_us() + (uint64_t)budget_ms * 1000;
+    while (!*done && test_now_us() < end)
+        harness_pump(h, done, 20);
+}
+
 /* Pumps until the server holds no egress flow, or budget_ms passes. */
 static void
 reset_hold_pump_until_flow_gone(harness_t *h, int budget_ms)
 {
-    for (int elapsed = 0; elapsed < budget_ms; elapsed += 20) {
+    uint64_t end = test_now_us() + (uint64_t)budget_ms * 1000;
+    while (test_now_us() < end) {
         mqvpn_stats_t st;
         reset_hold_stats(h, &st);
         if (st.tcp_flows_active == 0) return;
@@ -2525,7 +2537,7 @@ TEST(mqvpn_tcp_reset_hold_off_resets_at_once)
     ASSERT_EQ(st.tcp_reset_held, 0);
     ASSERT_EQ(st.tcp_reset_held_fin, 0);
     ASSERT_EQ(st.tcp_reset_held_expired, 0);
-    harness_pump(&h, &h.probe.closing_notified, 2000);
+    reset_hold_pump_wall(&h, &h.probe.closing_notified, 2000);
     ASSERT_EQ(h.probe.closing_notified, 1);
     ASSERT_EQ(h.probe.raw_recv_fin, 0);
     ASSERT_EQ(reset_hold_pattern_ok(h.probe.raw_recv_buf, h.probe.raw_recv_len), 1);
@@ -2544,7 +2556,7 @@ TEST(mqvpn_tcp_reset_hold_fin_after_flush)
     tcp_sink_t sink;
     ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
     harness_t h;
-    g_reset_hold_ms = 2000;
+    g_reset_hold_ms = 10000;
     ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
                             harness_cfg_allow_127_reset_hold),
               0);
@@ -2552,7 +2564,7 @@ TEST(mqvpn_tcp_reset_hold_fin_after_flush)
     reset_hold_open_flow(&h, &sink, path, sizeof(path));
 
     ASSERT_EQ(sink_send_then_reset(&h, &sink, RESET_HOLD_BYTES), 0);
-    harness_pump(&h, &h.probe.raw_recv_fin, 5000);
+    reset_hold_pump_wall(&h, &h.probe.raw_recv_fin, 5000);
     ASSERT_EQ(h.probe.raw_recv_fin, 1);
     ASSERT_EQ(h.probe.raw_recv_len, RESET_HOLD_BYTES);
     ASSERT_EQ(reset_hold_pattern_ok(h.probe.raw_recv_buf, h.probe.raw_recv_len), 1);
@@ -2570,7 +2582,7 @@ TEST(mqvpn_tcp_reset_hold_fin_after_flush)
     ASSERT_EQ(
         probe_send_body_retry(&h, &h.probe, (const uint8_t *)late, strlen(late), 500), 0);
     ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
-    harness_pump(&h, &h.probe.request_closed, 3000);
+    reset_hold_pump_wall(&h, &h.probe.request_closed, 3000);
     ASSERT_EQ(h.probe.request_closed, 1);
     ASSERT_EQ(h.probe.closing_notified, 0);
     reset_hold_pump_until_flow_gone(&h, 1000);
@@ -2597,18 +2609,18 @@ TEST(mqvpn_tcp_reset_hold_expiry_resets)
     tcp_sink_t sink;
     ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
     harness_t h;
-    g_reset_hold_ms = 500;
+    g_reset_hold_ms = 1000;
     ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
                             harness_cfg_allow_127_reset_hold),
               0);
     char path[64];
     reset_hold_open_flow(&h, &sink, path, sizeof(path));
 
-    ASSERT_EQ(sink_send_then_reset(&h, &sink, RESET_HOLD_BYTES), 0);
+    ASSERT_EQ(sink_send_then_reset(&h, &sink, 256 * 1024), 0);
     uint64_t t0 = test_now_us();
-    harness_pump(&h, &h.probe.raw_recv_fin, 3000);
+    reset_hold_pump_wall(&h, &h.probe.raw_recv_fin, 3000);
     ASSERT_EQ(h.probe.raw_recv_fin, 1);
-    ASSERT_EQ(h.probe.raw_recv_len, RESET_HOLD_BYTES);
+    ASSERT_EQ(h.probe.raw_recv_len, 256 * 1024);
 
     reset_hold_pump_until_flow_gone(&h, 3000);
     uint64_t held_ms = (test_now_us() - t0) / 1000;
@@ -2620,8 +2632,136 @@ TEST(mqvpn_tcp_reset_hold_expiry_resets)
     ASSERT_EQ(st.tcp_reset_held_fin, 1);
     ASSERT_EQ(st.tcp_reset_held_expired, 1);
     ASSERT_EQ(st.tcp_reset_error, 0);
-    ASSERT_EQ(held_ms >= 450, 1);
-    ASSERT_EQ(held_ms < 2000, 1);
+    ASSERT_EQ(held_ms >= 900, 1);
+    ASSERT_EQ(held_ms < 4000, 1);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Key on, with client body piled up behind a paused downlink when the origin
+ * resets (the origin stopped reading the request, the usual reason for a
+ * lingering close). The hold drains that body itself when it starts: the
+ * read notify fires only when another STREAM frame arrives, so without the
+ * drain the body would wait in the HTTP/3 receive buffer for one. The
+ * stream must complete normally once the client sends its FIN, with nothing
+ * expired. */
+TEST(mqvpn_tcp_reset_hold_drains_buffered_body)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+    int small = 4096;
+    ASSERT_EQ(setsockopt(sink.listen_fd, SOL_SOCKET, SO_RCVBUF, &small, sizeof(small)),
+              0);
+    harness_t h;
+    g_reset_hold_ms = 10000;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_reset_hold),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    /* Upload until the sink (never reading) backs the server up: the egress
+     * socket blocks and the downlink pauses (write interest armed), and the
+     * rest of the body waits in the request's receive buffer.
+     * probe_send_body_retry gives up once the probe is out of credit. */
+    size_t up_len = 8 * 1024 * 1024;
+    uint8_t *up = calloc(1, up_len);
+    ASSERT_EQ(up != NULL, 1);
+    (void)probe_send_body_retry(&h, &h.probe, up, up_len, 150);
+    free(up);
+    for (int i = 0; i < 100 && !harness_egress_wants_write(&h); i++) {
+        int never = 0;
+        harness_pump(&h, &never, 20);
+    }
+    ASSERT_EQ(harness_egress_wants_write(&h), 1);
+    {
+        int never = 0; /* let more body arrive behind the pause */
+        harness_pump(&h, &never, 500);
+    }
+    mqvpn_stats_t st;
+
+    ASSERT_EQ(sink_send_then_reset(&h, &sink, 64 * 1024), 0);
+    reset_hold_pump_wall(&h, &h.probe.raw_recv_fin, 5000);
+    ASSERT_EQ(h.probe.raw_recv_fin, 1);
+    ASSERT_EQ(h.probe.raw_recv_len, 64 * 1024);
+    ASSERT_EQ(reset_hold_pattern_ok(h.probe.raw_recv_buf, h.probe.raw_recv_len), 1);
+
+    ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
+    reset_hold_pump_wall(&h, &h.probe.request_closed, 4000);
+    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(h.probe.closing_notified, 0);
+    reset_hold_pump_until_flow_gone(&h, 1000);
+
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(st.tcp_reset_held_fin, 1);
+    ASSERT_EQ(st.tcp_reset_held_expired, 0);
+
+    harness_stop(&h);
+    tcp_sink_close(&sink);
+    free(h.probe.raw_recv_buf);
+}
+
+/* Key on, origin sends its response and FIN, then resets (shutdown, then a
+ * lingering close): the FIN is relayed first, and the reset surfaces as
+ * EPIPE on the next send() of client body (the kernel reports a reset in
+ * CLOSE_WAIT that way). Without the hold that send resets the stream and
+ * drops whatever of the response is still unacknowledged; with it, the late
+ * body is discarded and the stream completes normally. Counted under
+ * tcp_reset_error, with the FIN already sent. */
+TEST(mqvpn_tcp_reset_hold_fin_then_reset)
+{
+    tcp_sink_t sink;
+    ASSERT_EQ(tcp_sink_open(&sink, /*echo=*/0), 0);
+    harness_t h;
+    g_reset_hold_ms = 10000;
+    ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0,
+                            harness_cfg_allow_127_reset_hold),
+              0);
+    char path[64];
+    reset_hold_open_flow(&h, &sink, path, sizeof(path));
+
+    const char *resp = "response, then FIN, then a reset";
+    size_t resp_len = strlen(resp);
+    ASSERT_EQ(send(sink.conn_fd, resp, resp_len, MSG_NOSIGNAL), (ssize_t)resp_len);
+    ASSERT_EQ(shutdown(sink.conn_fd, SHUT_WR), 0);
+    reset_hold_pump_wall(&h, &h.probe.raw_recv_fin, 3000);
+    ASSERT_EQ(h.probe.raw_recv_fin, 1);
+    ASSERT_EQ(h.probe.raw_recv_len, resp_len);
+
+    struct linger lg = {.l_onoff = 1, .l_linger = 0};
+    ASSERT_EQ(setsockopt(sink.conn_fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)), 0);
+    close(sink.conn_fd);
+    sink.conn_fd = -1;
+    int never = 0;
+    harness_pump(&h, &never, 100);
+
+    const char *late = "client bytes after the origin reset";
+    for (int i = 0; i < 3; i++) {
+        ASSERT_EQ(
+            probe_send_body_retry(&h, &h.probe, (const uint8_t *)late, strlen(late), 500),
+            0);
+        harness_pump(&h, &never, 100);
+    }
+    mqvpn_stats_t st;
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_reset_error, 1);
+    ASSERT_EQ(st.tcp_reset_held, 1);
+    ASSERT_EQ(st.tcp_reset_held_fin, 1);
+    ASSERT_EQ(h.probe.closing_notified, 0);
+
+    ASSERT_EQ(probe_send_fin_retry(&h, &h.probe, 500), 0);
+    reset_hold_pump_wall(&h, &h.probe.request_closed, 3000);
+    ASSERT_EQ(h.probe.request_closed, 1);
+    ASSERT_EQ(h.probe.closing_notified, 0);
+    reset_hold_pump_until_flow_gone(&h, 1000);
+    reset_hold_stats(&h, &st);
+    ASSERT_EQ(st.tcp_flows_active, 0);
+    ASSERT_EQ(st.tcp_reset_held_expired, 0);
+    ASSERT_EQ(st.tcp_reset_econnreset, 0);
 
     harness_stop(&h);
     tcp_sink_close(&sink);
@@ -2654,7 +2794,7 @@ TEST(mqvpn_tcp_reset_hold_no_tail_resets_at_once)
     ASSERT_EQ(st.tcp_reset_econnreset_tail_flows, 0);
     ASSERT_EQ(st.tcp_reset_held, 0);
     ASSERT_EQ(gone_ms < 1000, 1);
-    harness_pump(&h, &h.probe.closing_notified, 2000);
+    reset_hold_pump_wall(&h, &h.probe.closing_notified, 2000);
     ASSERT_EQ(h.probe.closing_notified, 1);
     ASSERT_EQ(h.probe.raw_recv_fin, 0);
     ASSERT_EQ(h.probe.raw_recv_len, 0);
@@ -3628,6 +3768,8 @@ main(void)
     run_mqvpn_tcp_reset_hold_off_resets_at_once();
     run_mqvpn_tcp_reset_hold_fin_after_flush();
     run_mqvpn_tcp_reset_hold_expiry_resets();
+    run_mqvpn_tcp_reset_hold_drains_buffered_body();
+    run_mqvpn_tcp_reset_hold_fin_then_reset();
     run_mqvpn_tcp_reset_hold_no_tail_resets_at_once();
     run_mqvpn_tcp_closing_notify_idempotent();
     run_mqvpn_tcp_active_idle_timeout_evicts();

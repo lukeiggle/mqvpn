@@ -515,14 +515,16 @@ typedef struct {
     uint64_t tcp_reset_by_peer_downlink_bytes;
 
     /* [Hybrid] ResetHoldMs (server; always 0 client-side and with the key
-     * at 0). tcp_reset_held: the subset of tcp_reset_econnreset that came
-     * after data (a non-zero tail, or origin bytes still unread) and was
-     * held: the server stopped writing to the origin, kept relaying what
-     * the origin had sent, and ended the stream with FIN. tcp_reset_held_fin:
-     * held resets whose FIN was handed to the transport. tcp_reset_held_expired:
-     * held resets whose stream had not closed within ResetHoldMs, reset as
-     * without the key; after a FIN that loses only what the peer had not yet
-     * acknowledged. Counters. */
+     * at 0). tcp_reset_held: origin resets that came after data and were
+     * held instead of propagated: the server stopped writing to the origin,
+     * kept relaying what the origin had sent, and ended the stream with FIN.
+     * Each is also counted under tcp_reset_econnreset, or under
+     * tcp_reset_error when the origin sent FIN before resetting (EPIPE).
+     * tcp_reset_held_fin: held resets whose FIN was handed to the transport.
+     * tcp_reset_held_expired: held resets whose stream had not closed within
+     * ResetHoldMs, reset as without the key; after a FIN that loses only what
+     * the peer had not yet acknowledged. The last two are not exclusive (a
+     * FIN can be followed by expiry). Counters, appended under ABI 3. */
     uint64_t tcp_reset_held;
     uint64_t tcp_reset_held_fin;
     uint64_t tcp_reset_held_expired;

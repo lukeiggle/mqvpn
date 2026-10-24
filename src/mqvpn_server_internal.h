@@ -145,7 +145,7 @@ typedef struct {
     uint64_t other_tail_flows;
     uint64_t other_tail_bytes;
     uint64_t idle_evicted; /* idle-timeout evictions (no tail) */
-    /* [Hybrid] ResetHoldMs: econnreset resets held instead of propagated
+    /* [Hybrid] ResetHoldMs: origin resets held instead of propagated
      * (svr_tcp_egress_hold_reset), of which the ones whose FIN reached the
      * transport and the ones reset anyway when the hold ran out. */
     uint64_t held;

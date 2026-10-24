@@ -84,7 +84,12 @@
  * call chains this can sit under. Deliberately not a tight bound — it
  * exists to catch an order-of-magnitude mistake, not to certify a specific
  * target. */
-_Static_assert(3 * TCP_EGRESS_RELAY_CHUNK <= 48 * 1024,
+/* A held origin reset ([Hybrid] ResetHoldMs) discards client body through a
+ * small TCP_EGRESS_DISCARD_CHUNK frame of its own (svr_tcp_egress_discard_body)
+ * rather than a fourth chunk-sized one: the hold can start inside the third
+ * frame above. */
+#define TCP_EGRESS_DISCARD_CHUNK 2048
+_Static_assert(3 * TCP_EGRESS_RELAY_CHUNK + TCP_EGRESS_DISCARD_CHUNK <= 52 * 1024,
                "relay chunk frames must stay within a small-thread stack budget");
 
 /* The fairness budget (TCP_EGRESS_RELAY_BUDGET, tcp_egress.h) is normally
@@ -429,6 +434,11 @@ typedef struct svr_tcp_egress_flow_s {
      * is svr_now_us() / SLOT_US of the newest one. */
     uint64_t tail_slot;
     uint32_t tail_bytes[TCP_EGRESS_TAIL_SLOTS];
+
+    /* When send_body() last accepted origin bytes (svr_tcp_egress_tail_add);
+     * 0 = never. Consulted by svr_tcp_egress_hold_reset. */
+    uint64_t uplink_accept_us;
+
     int uplink_fin_sent; /* send_body(NULL,0,1) succeeded — no more FIN
                           * retries needed. Until this is true and
                           * egress_eof_seen is true, cb_request_write
@@ -569,6 +579,7 @@ svr_tcp_egress_tail_add(svr_tcp_egress_flow_t *ef, uint64_t now_us, size_t n)
     }
     uint32_t *b = &ef->tail_bytes[slot % TCP_EGRESS_TAIL_SLOTS];
     *b = (n > UINT32_MAX - *b) ? UINT32_MAX : *b + (uint32_t)n;
+    ef->uplink_accept_us = now_us;
 }
 
 /* The flow's reset tail at `now_us`: accepted bytes still inside the
@@ -687,8 +698,13 @@ svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
     }
     /* An origin reset that follows data: with [Hybrid] ResetHoldMs set,
      * finish the response instead of discarding it (`ef` may be gone on
-     * return here as well; see svr_tcp_egress_hold_reset). */
-    if (err == ECONNRESET && svr_tcp_egress_hold_reset(server, ef, &ctx, tail)) return;
+     * return here as well; see svr_tcp_egress_hold_reset). An origin that
+     * sent FIN before its reset (shutdown, then a lingering close) shows up
+     * as EPIPE on the next send() instead: the kernel reports a reset in
+     * CLOSE_WAIT as EPIPE. */
+    if ((err == ECONNRESET || (err == EPIPE && ef->egress_eof_seen)) &&
+        svr_tcp_egress_hold_reset(server, ef, &ctx, tail))
+        return;
     svr_tcp_egress_abort(server, ef);
 }
 
@@ -822,6 +838,35 @@ svr_tcp_egress_stash_downlink(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
     return 1;
 }
 
+/* Held origin reset ([Hybrid] ResetHoldMs): there is nowhere to send client
+ * body, so read and discard everything buffered, until -XQC_EAGAIN or the
+ * client's FIN. Reading is what lets the stream's receive side complete,
+ * and the read notify fires only for new data, so body buffered while the
+ * downlink was paused must be drained here when the hold starts, not left
+ * for a STREAM frame the client may never send. Same return convention as
+ * svr_tcp_egress_drain_body (0 = `ef` gone). */
+static int
+svr_tcp_egress_discard_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
+{
+    if (ef->fin_received_from_h3) return 1; /* already read to the end */
+    uint8_t sink[TCP_EGRESS_DISCARD_CHUNK];
+    for (;;) {
+        uint8_t fin = 0;
+        ssize_t n = xqc_h3_request_recv_body(ef->h3_request, sink, sizeof(sink), &fin);
+        if (n == -XQC_EAGAIN) break;
+        if (n < 0) {
+            svr_tcp_egress_on_relay_error(server, ef, 0);
+            return 0;
+        }
+        if (fin) {
+            ef->fin_received_from_h3 = 1;
+            break;
+        }
+        if (n == 0) break;
+    }
+    return 1;
+}
+
 /* Drain the flow's H3 request body into the egress socket. Stops at the
  * first would-block (recv_body returning -XQC_EAGAIN — nothing more
  * buffered right now) or the first send()-side backpressure (stash +
@@ -844,27 +889,7 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     if (ef->downlink_paused) return 1;
 
-    uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
-    if (ef->reset_held) {
-        /* The origin reset: there is nowhere to send client body. Read and
-         * discard it, so the stream's receive side still completes and its
-         * credit keeps moving. */
-        for (;;) {
-            uint8_t fin = 0;
-            ssize_t n = xqc_h3_request_recv_body(ef->h3_request, buf, sizeof(buf), &fin);
-            if (n == -XQC_EAGAIN) break;
-            if (n < 0) {
-                svr_tcp_egress_on_relay_error(server, ef, 0);
-                return 0;
-            }
-            if (fin) {
-                ef->fin_received_from_h3 = 1;
-                break;
-            }
-            if (n == 0) break;
-        }
-        return 1;
-    }
+    if (ef->reset_held) return svr_tcp_egress_discard_body(server, ef);
 
     /* Downlink-activity accounting: bytes that actually reached the egress
      * socket are summed here and folded into last_activity_us ONCE at the
@@ -873,6 +898,7 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
      * seconds granularity). The relay-error exits skip the refresh: `ef`
      * may already be freed there (see on_relay_error's contract). */
     size_t moved = 0;
+    uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
     for (;;) {
         uint8_t fin = 0;
         ssize_t n = xqc_h3_request_recv_body(ef->h3_request, buf, sizeof(buf), &fin);
@@ -1004,19 +1030,23 @@ svr_tcp_egress_try_uplink_fin(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
     }
 }
 
-/* [Hybrid] ResetHoldMs: decide whether an origin reset (the egress socket
- * reported ECONNRESET, on recv() or on send()) is held rather than
- * propagated, and if so start the hold. Returns 0 when the caller must reset
- * the stream as usual (key off, flow already held, or nothing behind the
- * reset), 1 when the reset is held; `ef` may already be freed on return 1
- * too (the FIN send below can fail into on_relay_error), so the caller must
- * not touch it either way.
+/* [Hybrid] ResetHoldMs: decide whether an origin reset is held rather than
+ * propagated, and if so start the hold. The reset reaches here as ECONNRESET
+ * on recv() or send(), or as EPIPE on send() after the origin's FIN (see the
+ * caller). Returns 0 when the caller must reset the stream as usual (key
+ * off, flow already held, or no data behind the reset), 1 when the reset is
+ * held; `ef` may already be freed on return 1 too (the body discard and the
+ * FIN send below can fail into on_relay_error), so the caller must not touch
+ * it either way.
  *
- * Held only after data: `tail` (the counters' estimate, which includes the
- * uplink stash) is non-zero, or the origin's bytes are still unread in the
- * socket. Linux returns queued data ahead of the reset on recv(), and the
- * error the failing call returned has been consumed, so a MSG_PEEK now
- * reports those bytes, or 0 at the end of them.
+ * Held only after data, by any of: the counters' tail estimate is non-zero
+ * (bytes send_body() accepted in the last second, plus the uplink stash);
+ * send_body() accepted origin bytes within the last ResetHoldMs (the
+ * transport may still be delivering them); or origin bytes are still unread
+ * in the socket. The last case arises when the reset is seen on send():
+ * Linux keeps the queued data readable after a reset, and the failing call
+ * consumed the socket error, so a MSG_PEEK reports those bytes (after a
+ * recv() that failed, the queue is already empty and it reports 0).
  *
  * The response's bytes are complete (the origin has sent everything it is
  * going to), so ending the stream with FIN once they are handed to the
@@ -1025,16 +1055,20 @@ svr_tcp_egress_try_uplink_fin(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
  * is still sent if the stream has not closed by the deadline (tick). The
  * egress socket is not written again (the origin is gone, and what it reset
  * on was data it did not want), so client body is drained and discarded
- * (svr_tcp_egress_drain_body). No new buffering: the bytes in question
- * already sit in the transport's send queue, bounded by the client's
- * stream credit, plus at most one uplink stash; the flow keeps its slot in
- * the fd budget until it ends. */
+ * (svr_tcp_egress_discard_body), starting with what is already buffered. No
+ * new buffering: the bytes in question already sit in the transport's send
+ * queue, bounded by the client's stream credit, plus at most one uplink
+ * stash; the flow keeps its slot in the fd budget until it ends. */
 static int
 svr_tcp_egress_hold_reset(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
                           const svr_tcp_egress_srv_ctx_t *ctx, uint64_t tail)
 {
     if (ctx->reset_hold_ms == 0 || ef->reset_held || ef->state != EGRESS_FLOW_ACTIVE)
         return 0;
+    uint64_t now = svr_now_us();
+    uint64_t hold_us = (uint64_t)ctx->reset_hold_ms * 1000ULL;
+    int recent = ef->uplink_accept_us != 0 && now >= ef->uplink_accept_us &&
+                 now - ef->uplink_accept_us < hold_us;
     int unread = 0;
     if (!ef->egress_eof_seen) {
         uint8_t peek;
@@ -1044,11 +1078,12 @@ svr_tcp_egress_hold_reset(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
         } while (n < 0 && errno == EINTR);
         unread = n > 0;
     }
-    if (tail == 0 && !unread) return 0;
+    if (tail == 0 && !recent && !unread) return 0;
 
     ef->reset_held = 1;
-    ef->reset_hold_deadline_us = svr_now_us() + (uint64_t)ctx->reset_hold_ms * 1000ULL;
+    ef->reset_hold_deadline_us = now + hold_us;
     ctx->resets->held++;
+    if (ef->uplink_fin_sent) ctx->resets->held_fin++; /* origin FIN came first */
 
     /* Nothing more goes to the origin: drop a stashed downlink chunk and
      * never issue the half-close on the dead socket. */
@@ -1059,6 +1094,7 @@ svr_tcp_egress_hold_reset(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
      * and then end-of-stream); otherwise the origin's side is finished. */
     if (!unread) ef->egress_eof_seen = 1;
     svr_tcp_egress_update_fd_interest(server, ef);
+    if (!svr_tcp_egress_discard_body(server, ef)) return 1; /* ef gone */
     /* A withheld stash is flushed first; on_h3_writable then sends the FIN. */
     if (ef->egress_eof_seen && !ef->uplink_withheld)
         svr_tcp_egress_try_uplink_fin(server, ef);

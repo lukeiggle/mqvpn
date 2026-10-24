@@ -261,7 +261,7 @@ typedef struct {
                                        * classify(), like the egress ACL fields below. */
 
     /* [Hybrid] ResetHoldMs: server-only, consumed by tcp_egress.c. When the
-     * origin resets an egress connection (ECONNRESET) after sending data,
+     * origin resets an egress connection after sending data,
      * the reset would discard every byte the transport still holds for the
      * stream. With this set, the server instead stops writing to the
      * origin, relays what the origin sent, ends the stream with FIN, and

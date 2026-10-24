@@ -60,6 +60,13 @@ extern "C" {
  * at compile time, so a bump cannot build without meeting this comment. */
 #define MQVPN_MAX_PATHS            8
 #define MQVPN_INIT_MAX_PATH_ID_MAX UINT64_C(0xffffffff)
+/* [Hybrid] ResetHoldMs: how long the server may hold an origin reset that
+ * follows data, finishing the response with FIN first, before resetting the
+ * stream anyway. 0 (default) = off: the reset is propagated at once. The
+ * ceiling rejects typos; a useful value covers the time the path needs to
+ * deliver a full stream window. */
+#define MQVPN_RESET_HOLD_MS_DEFAULT UINT32_C(0)
+#define MQVPN_RESET_HOLD_MS_MAX     UINT32_C(60000)
 
 /* ─── Opaque handles ─── */
 
@@ -506,6 +513,19 @@ typedef struct {
     uint64_t tcp_reset_by_peer_uplink_bytes;
     uint64_t tcp_reset_by_peer_downlink_flows;
     uint64_t tcp_reset_by_peer_downlink_bytes;
+
+    /* [Hybrid] ResetHoldMs (server; always 0 client-side and with the key
+     * at 0). tcp_reset_held: the subset of tcp_reset_econnreset that came
+     * after data (a non-zero tail, or origin bytes still unread) and was
+     * held: the server stopped writing to the origin, kept relaying what
+     * the origin had sent, and ended the stream with FIN. tcp_reset_held_fin:
+     * held resets whose FIN was handed to the transport. tcp_reset_held_expired:
+     * held resets whose stream had not closed within ResetHoldMs, reset as
+     * without the key; after a FIN that loses only what the peer had not yet
+     * acknowledged. Counters. */
+    uint64_t tcp_reset_held;
+    uint64_t tcp_reset_held_fin;
+    uint64_t tcp_reset_held_expired;
 } mqvpn_stats_t;
 
 typedef struct {

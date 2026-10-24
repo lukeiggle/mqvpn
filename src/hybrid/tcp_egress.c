@@ -437,6 +437,15 @@ typedef struct svr_tcp_egress_flow_s {
                           * a fin-only send is NOT buffered by xquic on
                           * -XQC_EAGAIN, so a dedicated retry is
                           * mandatory, not a redundant safety net). */
+    int reset_held;      /* [Hybrid] ResetHoldMs: the origin reset the connection
+                          * after sending data and the stream reset is being held
+                          * (svr_tcp_egress_hold_reset). From here on nothing is
+                          * written to the egress socket: client body is read and
+                          * discarded, and the stream ends with FIN once what the
+                          * origin sent has been handed to the transport. */
+    uint64_t reset_hold_deadline_us; /* while reset_held: reset the stream
+                                      * anyway at this time if it has not
+                                      * closed (svr_tcp_egress_tick) */
 
     struct svr_tcp_egress_flow_s *prev, *next;
 } svr_tcp_egress_flow_t;
@@ -625,6 +634,9 @@ svr_tcp_egress_abort(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
     xqc_h3_request_close(req);
 }
 
+static int svr_tcp_egress_hold_reset(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
+                                     const svr_tcp_egress_srv_ctx_t *ctx, uint64_t tail);
+
 static void
 svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef, int err)
 {
@@ -673,6 +685,10 @@ svr_tcp_egress_on_relay_error(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
             r->other_tail_bytes += tail;
         }
     }
+    /* An origin reset that follows data: with [Hybrid] ResetHoldMs set,
+     * finish the response instead of discarding it (`ef` may be gone on
+     * return here as well; see svr_tcp_egress_hold_reset). */
+    if (err == ECONNRESET && svr_tcp_egress_hold_reset(server, ef, &ctx, tail)) return;
     svr_tcp_egress_abort(server, ef);
 }
 
@@ -828,6 +844,28 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
 {
     if (ef->downlink_paused) return 1;
 
+    uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
+    if (ef->reset_held) {
+        /* The origin reset: there is nowhere to send client body. Read and
+         * discard it, so the stream's receive side still completes and its
+         * credit keeps moving. */
+        for (;;) {
+            uint8_t fin = 0;
+            ssize_t n = xqc_h3_request_recv_body(ef->h3_request, buf, sizeof(buf), &fin);
+            if (n == -XQC_EAGAIN) break;
+            if (n < 0) {
+                svr_tcp_egress_on_relay_error(server, ef, 0);
+                return 0;
+            }
+            if (fin) {
+                ef->fin_received_from_h3 = 1;
+                break;
+            }
+            if (n == 0) break;
+        }
+        return 1;
+    }
+
     /* Downlink-activity accounting: bytes that actually reached the egress
      * socket are summed here and folded into last_activity_us ONCE at the
      * "still alive" exits (a per-send() refresh inside the loop would call
@@ -835,7 +873,6 @@ svr_tcp_egress_drain_body(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
      * seconds granularity). The relay-error exits skip the refresh: `ef`
      * may already be freed there (see on_relay_error's contract). */
     size_t moved = 0;
-    uint8_t buf[TCP_EGRESS_RELAY_CHUNK];
     for (;;) {
         uint8_t fin = 0;
         ssize_t n = xqc_h3_request_recv_body(ef->h3_request, buf, sizeof(buf), &fin);
@@ -960,6 +997,72 @@ svr_tcp_egress_try_uplink_fin(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef)
         return;
     }
     ef->uplink_fin_sent = 1;
+    if (ef->reset_held) {
+        svr_tcp_egress_srv_ctx_t ctx;
+        svr_get_tcp_egress_ctx(server, &ctx);
+        ctx.resets->held_fin++;
+    }
+}
+
+/* [Hybrid] ResetHoldMs: decide whether an origin reset (the egress socket
+ * reported ECONNRESET, on recv() or on send()) is held rather than
+ * propagated, and if so start the hold. Returns 0 when the caller must reset
+ * the stream as usual (key off, flow already held, or nothing behind the
+ * reset), 1 when the reset is held; `ef` may already be freed on return 1
+ * too (the FIN send below can fail into on_relay_error), so the caller must
+ * not touch it either way.
+ *
+ * Held only after data: `tail` (the counters' estimate, which includes the
+ * uplink stash) is non-zero, or the origin's bytes are still unread in the
+ * socket. Linux returns queued data ahead of the reset on recv(), and the
+ * error the failing call returned has been consumed, so a MSG_PEEK now
+ * reports those bytes, or 0 at the end of them.
+ *
+ * The response's bytes are complete (the origin has sent everything it is
+ * going to), so ending the stream with FIN once they are handed to the
+ * transport is a normal close (RFC 9114 section 4.1, RFC 9000 section 3.1),
+ * and the reset the stream would have carried is deferred, not dropped: it
+ * is still sent if the stream has not closed by the deadline (tick). The
+ * egress socket is not written again (the origin is gone, and what it reset
+ * on was data it did not want), so client body is drained and discarded
+ * (svr_tcp_egress_drain_body). No new buffering: the bytes in question
+ * already sit in the transport's send queue, bounded by the client's
+ * stream credit, plus at most one uplink stash; the flow keeps its slot in
+ * the fd budget until it ends. */
+static int
+svr_tcp_egress_hold_reset(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
+                          const svr_tcp_egress_srv_ctx_t *ctx, uint64_t tail)
+{
+    if (ctx->reset_hold_ms == 0 || ef->reset_held || ef->state != EGRESS_FLOW_ACTIVE)
+        return 0;
+    int unread = 0;
+    if (!ef->egress_eof_seen) {
+        uint8_t peek;
+        ssize_t n;
+        do {
+            n = recv(ef->fd, &peek, 1, MSG_PEEK | MSG_DONTWAIT);
+        } while (n < 0 && errno == EINTR);
+        unread = n > 0;
+    }
+    if (tail == 0 && !unread) return 0;
+
+    ef->reset_held = 1;
+    ef->reset_hold_deadline_us = svr_now_us() + (uint64_t)ctx->reset_hold_ms * 1000ULL;
+    ctx->resets->held++;
+
+    /* Nothing more goes to the origin: drop a stashed downlink chunk and
+     * never issue the half-close on the dead socket. */
+    ef->downlink_paused = 0;
+    ef->downlink_stash_len = 0;
+    ef->downlink_shutdown_done = 1;
+    /* With origin bytes still unread, keep reading them (recv() returns them
+     * and then end-of-stream); otherwise the origin's side is finished. */
+    if (!unread) ef->egress_eof_seen = 1;
+    svr_tcp_egress_update_fd_interest(server, ef);
+    /* A withheld stash is flushed first; on_h3_writable then sends the FIN. */
+    if (ef->egress_eof_seen && !ef->uplink_withheld)
+        svr_tcp_egress_try_uplink_fin(server, ef);
+    return 1;
 }
 
 /* Stash one already-recv()'d-from-the-socket chunk (same "already consumed,
@@ -1364,6 +1467,11 @@ svr_tcp_egress_on_relay_ready(mqvpn_server_t *server, svr_tcp_egress_flow_t *ef,
             relayed += (size_t)sent;
             if (relayed >= TCP_EGRESS_RELAY_BUDGET) break;
         }
+        if (n < 0 && errno == ECONNRESET && ef->reset_held) {
+            /* Held: the reset was already accounted for; what it means
+             * here is that the origin's bytes have all been read. */
+            n = 0;
+        }
         if (n == 0) {
             /* Pure EOF: recv()==0 is level-triggered readable — drop
              * want_read PERMANENTLY for this fd (via the interest helper)
@@ -1430,7 +1538,15 @@ svr_tcp_egress_tick(mqvpn_server_t *server, uint64_t now_us)
          * dereferencing ef again after would be a use-after-free on the
          * next loop iteration. */
         svr_tcp_egress_flow_t *next = ef->next;
-        if (ef->state == EGRESS_FLOW_CONNECTING) {
+        if (ef->reset_held) {
+            /* Held origin reset ([Hybrid] ResetHoldMs): its deadline
+             * replaces the idle sweep. If the stream has not closed by
+             * then, reset it as without the key. */
+            if (now_us >= ef->reset_hold_deadline_us) {
+                ctx.resets->held_expired++;
+                svr_tcp_egress_abort(server, ef);
+            }
+        } else if (ef->state == EGRESS_FLOW_CONNECTING) {
             /* CONNECTING flows are never idle-evicted: they use
              * connect_deadline_us, not last_activity_us (which isn't even
              * meaningful yet — see that field's comment). */

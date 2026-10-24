@@ -145,6 +145,12 @@ typedef struct {
     uint64_t other_tail_flows;
     uint64_t other_tail_bytes;
     uint64_t idle_evicted; /* idle-timeout evictions (no tail) */
+    /* [Hybrid] ResetHoldMs: econnreset resets held instead of propagated
+     * (svr_tcp_egress_hold_reset), of which the ones whose FIN reached the
+     * transport and the ones reset anyway when the hold ran out. */
+    uint64_t held;
+    uint64_t held_fin;
+    uint64_t held_expired;
 } svr_tcp_reset_counters_t;
 
 /* Server-scope egress state + config, bundled (svr_get_egress_policy
@@ -165,6 +171,8 @@ typedef struct {
     uint32_t tcp_idle_timeout_sec;    /* ACTIVE-flow idle eviction, shared with the
                                        * client's tcp_lane (config.hybrid); 0 = disabled,
                                        * see the field comment in classifier.h */
+    uint32_t reset_hold_ms;           /* [Hybrid] ResetHoldMs; 0 = propagate an
+                                       * origin reset at once (config.hybrid) */
     int global_fd_budget;             /* mqvpn_server_egress_fd_budget(s) */
 } svr_tcp_egress_srv_ctx_t;
 

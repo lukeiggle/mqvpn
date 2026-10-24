@@ -101,6 +101,9 @@ mqvpn_server_get_stats(const mqvpn_server_t *s, mqvpn_stats_t *out)
     out->tcp_reset_error_tail_flows = 307;
     out->tcp_reset_error_tail_bytes = 16411;
     out->tcp_idle_evicted = 2027;
+    out->tcp_reset_held = 3011;
+    out->tcp_reset_held_fin = 2999;
+    out->tcp_reset_held_expired = 13;
     return 0;
 }
 
@@ -517,7 +520,9 @@ test_get_stats(void)
               "\"tcp_reset_econnreset_tail_flows\":3707,"
               "\"tcp_reset_econnreset_tail_bytes\":1048583,\"tcp_reset_error\":1301,"
               "\"tcp_reset_error_tail_flows\":307,\"tcp_reset_error_tail_bytes\":16411,"
-              "\"tcp_idle_evicted\":2027,\"uptime_sec\":4242");
+              "\"tcp_idle_evicted\":2027,\"tcp_reset_held\":3011,"
+              "\"tcp_reset_held_fin\":2999,\"tcp_reset_held_expired\":13,"
+              "\"uptime_sec\":4242");
 }
 
 /* ── get_status ───────────────────────────────────────────────────────────── */

@@ -725,6 +725,22 @@ was applied to a scratch copy of the tree and caught as expected:
 | the NULL-context branch writes a field (`flags`) | CBMC `harness_null_ctx`: the frame check |
 | spontaneous abandon allowed on an xquic-ACTIVE path | TLC: liveness violated (with no path-id credit, a primary pushed into CREATE_WAIT or DEGRADED before readiness never retries) |
 | the invariant compiled out: `NDEBUG` defined (the unit test built with `-DNDEBUG` in place of the target's `-UNDEBUG`; `-DNDEBUG` added to `cbmc/run.sh`'s own flags) | the unit test's canary; `cbmc/run.sh`'s canary |
+| the #416 state-table fix reverted (TUNNEL_READY → RECONNECTING invalid) | MBT (the client-glue model-based test): abort in `client_set_state()` (`invalid state transition`) |
+| `tick_reconnect` skips `client_reset_paths_for_reconnect` | MBT: `RECONNECT_TICK step, slot.live got=1 want=0` |
+| the reconnect reset keeps `hold_extra_paths` | MBT: `RECONNECT_API step, hold_extra_paths got=1 want=0` |
+| `cb_ready_to_create_path` ignores the hold | MBT: `MP_READY step, slot.state got=2 want=0` |
+| `client_release_path_hold` no longer activates pending paths | MBT: `TUNNEL_READY step, slot.state got=0 want=2` |
+| `mqvpn_client_add_path` ignores the hold | MBT: `ADD step, slot.state got=2 want=0` |
+| the hold released before `tunnel_config_ready` | MBT: `TUNNEL_READY step, in tunnel_config_ready: hold got=0 want=1` |
+| the `tick_path_recovery` gate removed | MBT: `PROBE_TICK step, slot.state got=2 want=1` |
+| `-XQC_EMP_CREATE_PATH` classified TRANSIENT, not PERMANENT | MBT: `MP_READY step, slot.state got=1 want=6` |
+| a release for an earlier incarnation accepted (handle reused per slot) | MBT: `DELIVER_RELEASE step, slot.state got=8 want=7` |
+| `mqvpn_client_on_platform_path_dropped` emits no `xqc_conn_close_path` | MBT: `DROP step, cmd xqc_conn_close_path got=0 want=1` |
+| `reactivate_slot_eligible` accepts a live VALIDATING slot (live and state checks dropped; each check alone is redundant with the others, so dropping one is not observable) | MBT: `PROBE_REACTIVATE step, reactivate_path() rejected got=0 want=1` |
+| `tick_drive_retry_timer` fires without comparing `now` to the deadline | MBT: `RETRY_FIRE step, commands at deadline - 1us got=1 want=0` |
+| `tick_reconnect` failure does not re-arm the reconnect timer | MBT: `RECONNECT_TICK step, slot.state got=0 want=2` |
+| the public `path_event` forwarding removed from `path_fsm_fire_path_event` | MBT: `ADD step, path_event delivered got=0 want=1` |
+| `tick_reconnect` without the RECONNECTING check | MBT: abort in `client_set_state()` (`invalid state transition`) |
 
 ## Counterexample log
 

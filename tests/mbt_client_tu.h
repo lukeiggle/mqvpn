@@ -16,5 +16,8 @@ const path_entry_t *mbt_slot(const mqvpn_client_t *c, int idx);
 int mbt_n_paths(const mqvpn_client_t *c);
 int mbt_multipath_ready(const mqvpn_client_t *c);
 int mbt_hold(const mqvpn_client_t *c);
+/* The assert canary: IDLE -> ESTABLISHED, an invalid transition that must
+ * abort in this TU. */
+void mbt_canary_bad_transition(mqvpn_client_t *c);
 
 #endif /* MQVPN_MBT_CLIENT_TU_H */

@@ -33,3 +33,9 @@ mbt_hold(const mqvpn_client_t *c)
 {
     return c->hold_extra_paths;
 }
+
+void
+mbt_canary_bad_transition(mqvpn_client_t *c)
+{
+    client_set_state(c, MQVPN_STATE_ESTABLISHED);
+}

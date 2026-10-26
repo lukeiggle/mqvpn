@@ -23,6 +23,8 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 FORMAL = os.path.dirname(HERE)
 REPO = os.path.dirname(FORMAL)
+sys.path.insert(0, FORMAL)
+import tla_values  # noqa: E402  (formal/tla_values.py, shared with formal/mbt)
 
 
 def die(msg):
@@ -36,6 +38,7 @@ INPUTS = [
     "formal/oracle/PathSlotOracle.tla",
     "formal/oracle/PathSlotOracle.cfg",
     "formal/oracle/gen_oracle.py",
+    "formal/tla_values.py",
 ]
 
 STATE_C = {
@@ -106,49 +109,6 @@ def cfg_max_retries():
     return int(found[0])
 
 
-TOKEN = re.compile(r'\s*(\[|\]|,|\|->|"[^"]*"|TRUE|FALSE|-?\d+|[A-Za-z_]\w*)')
-
-
-def tokenize(text):
-    pos, out = 0, []
-    text = text.rstrip()
-    while pos < len(text):
-        m = TOKEN.match(text, pos)
-        if not m:
-            die("cannot tokenize near: %r" % text[pos:pos + 40])
-        out.append(m.group(1))
-        pos = m.end()
-    return out
-
-
-def parse_value(toks, i):
-    t = toks[i]
-    if t == "[":
-        rec, i = {}, i + 1
-        while True:
-            key = toks[i]
-            if not re.fullmatch(r"[A-Za-z_]\w*", key) or toks[i + 1] != "|->":
-                die("malformed record near %r" % key)
-            if key in rec:
-                die("duplicate field %r" % key)
-            rec[key], i = parse_value(toks, i + 2)
-            if toks[i] == ",":
-                i += 1
-            elif toks[i] == "]":
-                return rec, i + 1
-            else:
-                die("unexpected token %r in record" % toks[i])
-    if t.startswith('"'):
-        return t[1:-1], i + 1
-    if t == "TRUE":
-        return True, i + 1
-    if t == "FALSE":
-        return False, i + 1
-    if re.fullmatch(r"-?\d+", t):
-        return int(t), i + 1
-    die("unexpected token %r" % t)
-
-
 def read_rows(path):
     with open(path, encoding="utf-8") as f:
         text = f.read()
@@ -157,11 +117,10 @@ def read_rows(path):
         block = block.strip()
         if not block.startswith("row = "):
             die("state block does not start with 'row = '")
-        toks = tokenize(block[len("row = "):])
-        row, end = parse_value(toks, 0)
-        if end != len(toks):
-            die("trailing tokens after a row")
-        rows.append(row)
+        try:
+            rows.append(tla_values.parse(block[len("row = "):]))
+        except ValueError as e:
+            die(str(e))
     if not rows:
         die("no rows in %s" % path)
     return rows

@@ -110,10 +110,10 @@ Both scripts also fail in cases where the tools themselves would pass:
 
 Last verified (TLC 2.19, CBMC 5.95.1):
 
-- safety: 4,252,566 states generated, 888,676 distinct — no error; every
+- safety: 8,626,511 states generated, 1,839,456 distinct — no error; every
   action takes a step
 - liveness: the same state space; 2 temporal branches, checked over
-  1,777,352 total distinct states — no error
+  3,678,912 total distinct states — no error
 - oracle: 196 legal pre-states × 19 event/context classes = 3,724 rows;
   every post-state legal
 - `test_path_slot_oracle`: 3,724 rows OK; 3,836 of 4,032 abstract shapes
@@ -466,6 +466,15 @@ over-approximations:
    where the code takes it from the scheduler, fixed per connection
    (`:4075-4077`).
 
+Two variables model the client's request for a server scheduler.
+`reqSched` is `config.request_server_scheduler`, chosen at Init and never
+changed. `hold` is `hold_extra_paths`: `cli_masque_start_tunnel` sets it
+when `reqSched` is on, `client_release_path_hold` (after TUNNEL_READY)
+clears it, and `client_reset_paths_for_reconnect` clears it too. While it
+is set neither `mqvpn_client_add_path` nor `cb_ready_to_create_path`
+activates a secondary path, which `EnvActivate` expresses as `~hold`. A
+connection close leaves it as it is.
+
 Work the code does synchronously inside one call is split into separate
 steps:
 
@@ -479,13 +488,13 @@ Every action of the model's `Next` has a row below.
 
 | Action | Code |
 |--------|------|
-| `ApiConnect` | `mqvpn_client_connect` from IDLE: no reset; `cli_start_connection` refuses a primary that is not attached (`:2811-2818`); the primary bootstrap writes id 0, live, VALIDATING (`:2896-2902`), and xquic creates the initial path ACTIVE (`xqc_path_init`, `xqc_multipath.c:351-353`) |
-| `EnvMpReady` | `cb_ready_to_create_path` (`:2531-2541`), only on a multipath connection once a path id is available (`xqc_engine.c:785-800`, `xqc_conn.c:5519-5542`); may precede ESTABLISHED |
-| `EnvTunnelReady`, `EnvEstablish` | `cli_connect_ip_on_body`, once the address is assigned: the primary, if still VALIDATING and attached, gets its handshake VALIDATION_OK (`:2143-2152`), then TUNNEL_READY (`:2154`); `mqvpn_client_set_tun_active` → ESTABLISHED (`:3611-3622`) |
+| `ApiConnect` | `mqvpn_client_connect` from IDLE: no reset; `cli_start_connection` refuses a primary that is not attached (`:2811-2818`); the primary bootstrap writes id 0, live, VALIDATING (`:2896-2902`), and xquic creates the initial path ACTIVE (`xqc_path_init`, `xqc_multipath.c:351-353`); `cli_masque_start_tunnel` sets `hold` when `reqSched` (the handshake is folded into the connect: C sets it after the handshake, and the excluded run, where `cli_masque_start_tunnel` fails first, sends no CONNECT-IP request and only closes; `mpReady` cannot precede the handshake) |
+| `EnvMpReady` | `cb_ready_to_create_path` (`:2531-2541`), only on a multipath connection once a path id is available (`xqc_engine.c:785-800`, `xqc_conn.c:5519-5542`); may precede ESTABLISHED; while `hold` is set it only records readiness (`:2628`), and `client_release_path_hold` activates later |
+| `EnvTunnelReady`, `EnvEstablish` | `cli_connect_ip_on_body`, once the address is assigned: the primary, if still VALIDATING and attached, gets its handshake VALIDATION_OK (`:2143-2152`), then TUNNEL_READY (`:2154`), then `client_release_path_hold` clears `hold` (`:2218`; when multipath is ready its `activate_pending_paths` is the next `EnvActivate` step); `mqvpn_client_set_tun_active` → ESTABLISHED (`:3611-3622`) |
 | `EnvConnClose` | `cb_h3_conn_close` (`:1426-1452`): slot untouched, RECONNECTING or CLOSED; xquic destroys its paths without notifying, so in-flight removals are dropped |
-| `EnvReconnect` | `tick_reconnect` (`:4108-4140`) / `mqvpn_client_connect` from RECONNECTING (`:3202-3262`): CONN_RESET to the slot, then start; the reset runs whether or not the start succeeds; success needs an attached primary, failure re-arms the timer |
+| `EnvReconnect` | `tick_reconnect` (`:4108-4140`) / `mqvpn_client_connect` from RECONNECTING (`:3202-3262`): CONN_RESET to the slot, then start; the reset runs whether or not the start succeeds; success needs an attached primary, failure re-arms the timer. The reset clears `hold` (`client_reset_paths_for_reconnect`, `:1035`); a successful start sets it again when `reqSched` |
 | `ApiDisconnectWhileReconnecting` | `mqvpn_client_disconnect` from RECONNECTING (`:3265-3310`): no connection exists then, so the client just goes CLOSED, which cancels the pending retry (`tick_reconnect` runs only while RECONNECTING, `:4110`). A disconnect of a live connection is one of the closes `EnvConnClose` stands for |
-| `EnvActivate` | `activate_pending_paths` (`:2519-2526`) once multipath is ready on a live connection |
+| `EnvActivate` | `activate_pending_paths` (`:2519-2526`) once multipath is ready on a live connection and `hold` is clear (`:3573`, `:2628`) |
 | `EnvRetryFire`, `EnvValidationPoll`, `EnvStableConfirm` | `tick_path_recovery` (`:4091-4103`), which needs multipath ready and ESTABLISHED: `tick_drive_retry_timer` (`:4002-4020`), `tick_check_all_validations` (`:4039-4083`; validates a VALIDATING slot whose path is xquic-ACTIVE) and `path_fsm_tick_confirm_stable` |
 | `ApiManualReactivate` | `mqvpn_client_reactivate_path` and `reactivate_slot_eligible` (`:3549-3594`) |
 | `ApiDrop`, `ApiRemove` | `mqvpn_client_on_platform_path_dropped` / `mqvpn_client_remove_path` (`:3456-3508`): PATH_ABANDON for a live path when a connection exists; it can fail (`xqc_conn_close_path`, `xqc_multipath.c:751-787`) and the result is ignored. xquic refuses to abandon the only ACTIVE path (`xqc_multipath.c:781-787`). The model departs from the code here (first exception above) |
@@ -493,7 +502,7 @@ Every action of the model's `Next` has a row below.
 | `EnvXqcSpontaneousAbandon` | a validation timeout (`xqc_path_validation_on_retx`, `xqc_multipath.c:460-484`) of a path that is not xquic-ACTIVE; bounded, not fair |
 | `DeliverRemoval` | `cb_path_removed` → `find_path_by_xqc_id` (`:2704-2721`, `:561-569`), whose lookup matches only a live slot with the same id. This one-slot model does not exercise that guard: every pending removal is the live slot's own (see `RemovalsBelongToCurrentIncarnation`), so the lookup always matches |
 | `EnvPathIdleReap`, `EnvConnIdleTimeout` | an orphan is closed by the path idle timeout only with multipath and when it is not the only xquic-ACTIVE path (`xqc_timer.c:137-161`; the model takes the slot's xquic-ACTIVE path to be the only one); otherwise the connection idles out |
-| `ApiAdd` | `mqvpn_client_add_path` (`:3362-3441`): reuses only a CLOSED_FREE slot |
+| `ApiAdd` | `mqvpn_client_add_path` (`:3362-3441`): reuses only a CLOSED_FREE slot; its own activation is skipped while `hold` is set (`:3573`, expressed by `EnvActivate`'s `~hold`) |
 | `PlatformRelease` | the platform's side of the drop contract: after a drop or remove it stops its I/O, closes its socket and makes the release call (`include/libmqvpn.h:884-886`, `include/libmqvpn.h:908-910`); no library code runs until that call arrives (`DeliverRelease`) |
 | `DeliverRelease`, `PlatformDupRelease` | `mqvpn_client_on_platform_path_released` (`:3512-3535`), its guards in order; late and duplicated calls for any handle ever issued |
 | `EnvDestroy` | `mqvpn_client_destroy` (`:3123-3170`): finalizes a slot that still owes a release; nothing happens afterwards |
@@ -505,6 +514,7 @@ The Code column names the code each property is about, function first.
 | Property | Kind | Meaning | Code |
 |----------|------|---------|------|
 | `InvPerState` | invariant | `path_invariant_check()` holds in every reachable state | `path_invariant_check` (`path_state_machine.c:140-230`), which `path_on_event` runs after every handler (`path_state_machine.c:454`) |
+| `HoldNotAfterTunnelReady` | invariant | `hold` is set only while connecting, reconnecting or closed, never once the tunnel is ready; so the tick-driven activations (`EnvRetryFire`, `ApiManualReactivate`), which need ESTABLISHED, need no `~hold`. A close leaves `hold` set, hence the weaker form of "only while connecting" | `client_release_path_hold` (`:2218`), `cb_h3_conn_close` leaves it alone |
 | `OpsConsistent` | invariant | while not destroyed, a transport is installed exactly while a release is owed | `mqvpn_client_add_path` installs the transport (`:3410-3411`) and `path_on_add` clears the release flag (`path_state_machine.c:657-658`); `client_finalize_transport` removes it (`:970-973`) and `path_on_transport_released` sets the flag (`path_state_machine.c:693-694`) |
 | `ReleaseAtMostOnce` | invariant | each incarnation's transport is finalized at most once. The release counts here count finalizations (`client_finalize_transport`), which call `ops.release` only when the platform supplied it (it is optional) | `mqvpn_client_on_platform_path_released` refuses a slot already released, then finalizes (`:3525-3533`); `client_finalize_transport` clears the ops before calling out (`:964-981`); `mqvpn_client_destroy` finalizes only a slot not yet released (`:3164-3167`) |
 | `EarlierIncarnationsReleased` | invariant | a slot is reused only after its previous transport was finalized | `mqvpn_client_add_path` reuses only a CLOSED_FREE slot (`:3386-3401`); `maybe_transition_dropped_to_free` enters CLOSED_FREE only once the release happened (`path_state_machine.c:699-707`) |
@@ -537,6 +547,11 @@ and the bounds listed under [Abstractions](#abstractions), and no others:
   Since the reset runs before any start attempt, and a failed attempt on an
   already-reset slot changes nothing, this also means that an attached
   primary is eventually reconnected;
+- `hold` is released once the tunnel is ready (`EnvTunnelReady`, already
+  fair), and a reconnect reset clears it. It stays set after a terminal
+  close or a destroy, as the properties' own exclusions allow. No property
+  says a PENDING slot is eventually activated (`EnvActivate` is not fair),
+  so `hold` adds none;
 - armed retry timers fire (`EnvRetryFire`);
 - an orphan is eventually resolved by the route xquic actually has: the
   path idle timeout when multipath is on and the path is not xquic-ACTIVE,

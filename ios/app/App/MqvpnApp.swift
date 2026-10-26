@@ -5,7 +5,7 @@ import SwiftUI
 @preconcurrency import NetworkExtension
 
 @main
-struct MqvpnPoCApp: App {
+struct MqvpnApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var controller = TunnelController()
 
@@ -21,13 +21,13 @@ struct MqvpnPoCApp: App {
     }
 }
 
-/// PoC container controller: load/save the one NETunnelProviderManager,
+/// Container controller: load/save the one NETunnelProviderManager,
 /// start/stop it, and — while foregrounded and connected — poll the provider
-/// for a development snapshot over `sendProviderMessage`. Per-path transfer
+/// for a status snapshot over `sendProviderMessage`. Per-path transfer
 /// rates are derived here from consecutive snapshots.
 @MainActor
 final class TunnelController: ObservableObject {
-    static let providerBundleID = "com.mp0rta.mqvpnpoc.PacketTunnel"
+    static let providerBundleID = "org.mqvpn.app.PacketTunnel"
 
     @Published var status: NEVPNStatus = .invalid
     @Published var statusText = "not loaded"
@@ -63,13 +63,12 @@ final class TunnelController: ObservableObject {
             let m = existing.first ?? NETunnelProviderManager()
             if existing.isEmpty {
                 // Placeholder only: NE rejects an empty serverAddress at save.
-                // Decoupled from the real peer, which the seeding step below
-                // (and ultimately the extension) resolves and sets itself.
+                // The extension resolves the real peer for tunnelRemoteAddress.
                 let proto = NETunnelProviderProtocol()
                 proto.providerBundleIdentifier = Self.providerBundleID
-                proto.serverAddress = (try? ServerSettings.fromBundle())?.host ?? "mqvpn"
+                proto.serverAddress = "mqvpn"
                 m.protocolConfiguration = proto
-                m.localizedDescription = "mqvpn PoC"
+                m.localizedDescription = "mqvpn"
                 m.isEnabled = true
                 try await m.saveToPreferences()
                 try await m.loadFromPreferences()
@@ -79,16 +78,18 @@ final class TunnelController: ObservableObject {
                 statusText = "config error"; return
             }
             let pc = proto.providerConfiguration
-            if !ServerSettings.serverKeysPresent(in: pc) {                 // ABSENT → seed
-                let seed = try ServerSettings.fromBundle()
-                try await performAtomicSave(NEConfigStore(manager: m, proto: proto),
-                                            merge: seed.toProviderConfiguration())
-                serverSettings = seed
-            } else if let s = ServerSettings(providerConfiguration: pc) {  // VALID
+            let psk = try? PSKStore.load(proto.passwordReference)
+            if let psk, let s = ServerSettings(providerConfiguration: pc, authKey: psk) {
                 serverSettings = s
-            } else {                                                       // CORRUPT → D4: no overwrite
+            } else {
                 serverSettings = nil
-                configError = "server config invalid — re-enter in Settings"
+                // No keys = first run (the dashboard points to Settings);
+                // keys that do not parse = corrupt, reported, never overwritten.
+                if psk == nil {
+                    configError = "access key unreadable — re-enter in Settings"
+                } else if ServerSettings.serverKeysPresent(in: pc) {
+                    configError = "server config invalid — re-enter in Settings"
+                }
             }
             manager = m
             reorderSettings = ReorderSettings(providerConfiguration: pc) ?? .disabled
@@ -169,10 +170,22 @@ final class TunnelController: ObservableObject {
         }
         isSaving = true
         defer { isSaving = false }
+        // New keychain item first; the old one goes only after the commit, so
+        // a failed save leaves the saved configuration and its PSK untouched.
+        let oldRef = proto.passwordReference
+        let newRef = try PSKStore.add(server.authKey)
+        proto.passwordReference = newRef
         var merged = server.toProviderConfiguration()
         for (k, v) in reorder.toProviderConfiguration() { merged[k] = v }
         for (k, v) in hybrid.toProviderConfiguration() { merged[k] = v }
-        try await performAtomicSave(NEConfigStore(manager: manager, proto: proto), merge: merged)
+        do {
+            try await performAtomicSave(NEConfigStore(manager: manager, proto: proto), merge: merged)
+        } catch {
+            proto.passwordReference = oldRef
+            PSKStore.delete(newRef)
+            throw error
+        }
+        PSKStore.delete(oldRef)
         serverSettings = server; reorderSettings = reorder; hybridSettings = hybrid; configError = nil   // only on success
     }
 

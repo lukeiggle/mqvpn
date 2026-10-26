@@ -33,10 +33,18 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
     private var resolvedIP = ""
 
     override func startTunnel(options: [String: NSObject]?) async throws {
-        let providerConfig = (self.protocolConfiguration as? NETunnelProviderProtocol)?
-            .providerConfiguration
-        guard let server = ServerSettings(providerConfiguration: providerConfig) else {
-            throw NSError(domain: "mqvpn.poc", code: 10,
+        let proto = self.protocolConfiguration as? NETunnelProviderProtocol
+        let providerConfig = proto?.providerConfiguration
+        let authKey: String
+        do {
+            authKey = try PSKStore.load(proto?.passwordReference)
+        } catch {
+            throw NSError(domain: "org.mqvpn.app", code: 12,
+                          userInfo: [NSLocalizedDescriptionKey: "access key unavailable — unlock the device and retry"])
+        }
+        guard let server = ServerSettings(providerConfiguration: providerConfig,
+                                          authKey: authKey) else {
+            throw NSError(domain: "org.mqvpn.app", code: 10,
                           userInfo: [NSLocalizedDescriptionKey: "server not configured"])
         }
         let reorder = ReorderSettings(providerConfiguration: providerConfig) ?? .disabled
@@ -44,7 +52,7 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         guard let resolved = await Task.detached(priority: .userInitiated, operation: {
             resolveServer(server.host, server.port)
         }).value, let resolvedIP = resolved.ipString else {
-            throw NSError(domain: "mqvpn.poc", code: 11,
+            throw NSError(domain: "org.mqvpn.app", code: 11,
                           userInfo: [NSLocalizedDescriptionKey: "server unresolved: \(server.host)"])
         }
         self.resolvedIP = resolvedIP
@@ -181,7 +189,9 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // collectors — exitReasserting must not double-arm (D6 rule 3).
             takeContinuation()?.resume()
             if let engine { readLoop(engine) }
-            metrics?.start()      // 10s cadence os_log dumps
+            #if DEBUG
+            metrics?.start()      // 10s cadence os_log dumps for the device gates
+            #endif
             snapshot?.start()     // 1s cadence app-facing cache
         case .failStart(let failure):
             takeContinuation()?.resume(throwing: Self.error(from: failure))
@@ -211,10 +221,10 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             // -4 == MQVPN_ERR_TLS: name it so the dashboard's failure line
             // is recognizably TLS (gate G-t1).
             let msg = code == -4 ? "TLS certificate rejected" : "tunnel closed"
-            return NSError(domain: "mqvpn.poc", code: Int(code),
+            return NSError(domain: "org.mqvpn.app", code: Int(code),
                            userInfo: [NSLocalizedDescriptionKey: msg])
         case .local(let code):
-            return NSError(domain: "mqvpn.poc", code: Int(code),
+            return NSError(domain: "org.mqvpn.app", code: Int(code),
                            userInfo: [NSLocalizedDescriptionKey: "engine start failed"])
         case .settings(let err):
             return err
@@ -252,8 +262,8 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         // route captures and the server NATs to an unroutable private
         // address — name resolution dies and every app looks offline.
         s.dnsSettings = NEDNSSettings(servers: ["1.1.1.1", "8.8.8.8"])
-        // IPv6 (info.has_v6 / assigned_ip6 / assigned_prefix6) is out of PoC
-        // scope: the PoC server config assigns IPv4 only.
+        // IPv6 (info.has_v6 / assigned_ip6 / assigned_prefix6) is not
+        // applied yet: inner traffic is IPv4 only.
         return s
     }
 

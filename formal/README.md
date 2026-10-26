@@ -49,8 +49,14 @@ If a check failed on your change, see
 | `oracle/path_slot_oracle.inc` | The generated table (committed) |
 | `oracle/oracle_abs.h` | The one C definition of the abstraction, the canonical concretization, the caller's own slot writes, the update classes and the verified domain |
 | `cbmc/harness_path_on_event.c`, `cbmc/run.sh` | CBMC harnesses |
-| `run_tlc.sh` | TLC runs and oracle regeneration (local and CI) |
+| `mbt/MqvpnPathSlotMbt.cfg` | The model's configuration for the client-glue traces (bounds small enough to dump the whole state graph) |
+| `mbt/gen_traces.py`, `mbt/test_gen_traces.py` | TLC state graph → `path_slot_traces.inc`; the generator's own unit tests |
+| `mbt/path_slot_traces.inc` | The generated traces (committed) |
+| `mbt/mbt_trace.h` | The types of the trace table |
+| `run_tlc.sh` | TLC runs and oracle and trace regeneration (local and CI) |
 | `../tests/test_path_slot_oracle.c` | The exhaustive oracle test (a normal unit test) |
+| `../tests/test_path_slot_mbt.c` | The client-glue replay driver (a normal unit test) |
+| `../tests/mbt_client_tu.[ch]`, `../tests/fake_xquic.[ch]`, `../tests/fake_xquic_redirect.h` | The private copy of `src/mqvpn_client.c` the driver runs, and the scripted xquic it runs against |
 
 ## How to run
 
@@ -62,15 +68,21 @@ dump, whose format is not a stable interface.
 ```bash
 curl -fsSL -o ~/tla2tools.jar https://github.com/tlaplus/tlaplus/releases/download/v1.7.4/tla2tools.jar
 export TLA2TOOLS_JAR=~/tla2tools.jar
-formal/run_tlc.sh all        # sany, safety, live, oracle (about 1-4 minutes)
+formal/run_tlc.sh all        # sany, safety, live, oracle, mbt (about 5-10 minutes)
 git diff --exit-code formal/oracle/path_slot_oracle.inc   # the regenerated table must equal the committed one
+git status --porcelain formal/mbt/                        # likewise the client-glue traces: empty output
+python3 -B -m unittest discover -s formal/mbt -p 'test_*.py'
+ctest --test-dir build -R test_path_slot_mbt --output-on-failure   # replay the traces (a Debug or sanitizer build)
 formal/cbmc/run.sh           # cbmc on PATH (Ubuntu 24.04: apt install cbmc)
 ```
 
 `run_tlc.sh all` first runs SANY, the TLA+ parser and semantic checker in
 `tla2tools.jar`, on every module, then the safety run, the liveness run and
-the oracle generation. `test_path_slot_oracle` builds and runs with the
-other unit tests (`ctest`).
+the oracle generation and the trace generation (`mbt`; `run_tlc.sh mbt`
+runs it alone). The `mbt` run writes the whole state graph (about 3 GB of
+DOT) into a temporary directory and needs about 4 GB of Java heap.
+`test_path_slot_oracle` and `test_path_slot_mbt` build and run with the other
+unit tests (`ctest`).
 
 CBMC is tested with 5.95.1, Ubuntu 24.04's package; the `Formal` workflow
 pins its runner to that release and checks the version. CBMC 6 documents
@@ -618,13 +630,95 @@ path to validate (a black-holed path never does).
   no action: a run that uses up the ids fails `TypeOK`, which only the
   safety run checks.
 
+## The client glue, model-based
+
+The oracle and CBMC cover `path_on_event()`. The code around it (the API
+entry points, `tick`, the xquic callbacks, the hold, the activation and the
+connection lifecycle, in `src/mqvpn_client.c`) decides which event reaches
+the slot and with which context. `test_path_slot_mbt` checks that code
+against the model.
+
+**What is compared.** `gen_traces.py` walks the state graph TLC writes for
+`MqvpnPathSlot.tla` under `mbt/MqvpnPathSlotMbt.cfg` (`MaxRetries = 6`, up to
+3 incarnations of the slot) and picks traces, each a path from `Init`. The
+driver replays each trace against the real client code and, after every
+step, compares with the model's post-state:
+
+- the slot's abstract state (`oracle_abs.h`: state, attached, live,
+  released, retry count, whether the retry and stable timers are armed, the
+  xquic path id);
+- the connection stage, multipath readiness and the hold;
+- the public path status, and whether the platform transport is installed;
+- the xquic commands the client issued (`xqc_conn_create_path` with its
+  path status, `xqc_conn_close_path` with its id, `xqc_conn_close`);
+- the public `path_event` callbacks and the `tunnel_config_ready` calls;
+- at a retry step, that nothing happens 1 µs before the deadline.
+
+**Classes.** A class is a distinction the code's guards and branches read (an
+action with the values of the variables it branches on). The generator picks
+the shortest trace for each, greedily, per client configuration (`mp`,
+`mpCredit`, `reqSched`, scheduler, `reconnect`); the header of
+`path_slot_traces.inc` lists them and gives the counts (125 classes, 82
+traces, 551 steps). A required class with no trace fails generation; it is not skipped.
+
+**Probes.** A negative probe is a trace that ends in a call the code must
+refuse, placed in a state where only the guard under test refuses it: the
+`tick_path_recovery` gate before ESTABLISHED, the xquic id comparison in the
+poll, a tick while the hold is set, `reactivate_path()` (wrong stage, an
+earlier incarnation's handle, an ineligible slot), a removal for another
+id, and a tick after a disconnect while reconnecting. Expected: no change of
+state, no command, no callback.
+
+**Trusted, not checked.**
+
+- The fake xquic's semantics (`tests/fake_xquic.c`): what `create_path`,
+  `close_path`, the path metrics and the connection calls return. They are
+  scripted by the trace, from what xquic does (the model's environment
+  actions cite the xquic source).
+- The generator's choice decoder and composition: the model's
+  nondeterministic choice of an edge is recovered from the pre/post
+  difference, and a transient state the code never rests in (a pending slot
+  activated inside `add_path`, `cb_ready_to_create_path` or
+  `client_release_path_hold`) is fused with its activation step. The
+  generator stops on anything unexpected and `test_gen_traces.py` tests its
+  stages, but only the replay compares the composition with the code.
+- The expected-command contract: which commands a step must issue, as the
+  generator derives them from the model's `Step` output. It does not compare
+  call counts of queries, log lines, `send_after_release` or whole
+  `path_event` sequences.
+- The driver's own time and ordering rules (a clock advance past each
+  deadline, one tick, the order in which a step's callbacks arrive).
+
+**Reading a failure.**
+
+- `FAIL trace T step S (<op>): <field> got=<n> want=<n>` — trace `T`
+  (index in `path_slot_traces.inc`), step `S`, the operation (`TUNNEL_READY`,
+  `RETRY_FIRE`, ...) and the field that differs. An `abort` in
+  `client_set_state()` (`invalid state transition`) is the client's own
+  assertion, which the target keeps on (`-UNDEBUG`).
+- `FAIL canary (fsm|client)` — the assert in `path_state_machine.c` (`fsm`)
+  or `mqvpn_client.c` (`client`) did not fire in a forked child: the target
+  was built with `NDEBUG`, so its other results mean nothing.
+- `formal/mbt/path_slot_traces.inc is stale: run formal/run_tlc.sh mbt and
+  commit it` — the `Formal` workflow regenerated the traces and they differ
+  from the committed ones, because the model or the generator changed.
+  Regenerate, read the diff, and commit it with the model change. The driver
+  also fails its build (`_Static_assert`) if the traces were generated for
+  another `PATH_RECREATE_MAX_RETRIES`.
+
 ## Scope
 
 - Checked against the C code: `path_on_event()` and
   `path_fsm_tick_confirm_stable()`, with the two caller prefixes above.
-- Transcribed but not checked against the code: every environment action,
-  including the API entry points, the tick dispatch, the connection
-  lifecycle and destroy.
+- Checked against the client glue by replay (`test_path_slot_mbt`): the
+  environment actions, API entry points, tick dispatch, connection lifecycle
+  and destroy, for the classes and probes above.
+- Transcribed but not checked against the code: what remains of the
+  environment actions that the replay cannot reach, i.e. xquic's own
+  behaviour (the fake scripts it), the handshake watchdog and the data
+  plane. Liveness is checked on the model only; time is abstracted (the
+  driver advances the clock past each deadline and checks the boundary
+  only for the retry timer).
 - Not modelled:
   - several slots;
   - primary rotation and cross-slot id lookups;

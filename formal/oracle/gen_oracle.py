@@ -74,7 +74,7 @@ STATUS_C = {"PENDING": "MQVPN_PATH_PENDING", "ACTIVE": "MQVPN_PATH_ACTIVE",
 SLOT_FIELDS = ["state", "attached", "live", "released", "xqcId", "retries",
                "retryArmed", "stableArmed"]
 ROW_FIELDS = ["pre", "ev", "result", "target", "reached", "prefix", "post",
-              "status", "fires", "notify", "retryUpd", "stableUpd",
+              "status", "fires", "retryUpd", "stableUpd",
               "retriesUpd"]
 N_EVCTX = 19
 # The event/context classes every pre-state must have (as C constants): the
@@ -223,8 +223,6 @@ def main():
         for b in ("prefix", "fires"):
             if not isinstance(r[b], bool):
                 die("field %s is not boolean: %r" % (b, r[b]))
-        if not is_int(r["notify"]) or r["notify"] not in (0, 1, 2, 3):
-            die("notify out of range: %r" % r["notify"])
         for s in (r["pre"], r["post"]):
             if max_retries is None or s["retries"] > max_retries:
                 max_retries = s["retries"]
@@ -266,13 +264,13 @@ def main():
         out.append("    %s," % slot_c(s))
     out.append("};")
     out.append("")
-    out.append("/* {pre, event, ctx, prefix, post, status, fires, notify, retry_upd, stable_upd, retries_upd} */")
+    out.append("/* {pre, event, ctx, prefix, post, status, fires, retry_upd, stable_upd, retries_upd} */")
     out.append("static const oracle_row_t PATH_SLOT_ORACLE_ROWS[PATH_SLOT_ORACLE_N_ROWS] = {")
     for key in sorted(keyed):
         r, ctx = keyed[key]
-        out.append("    {%s, OEV_%s, %s, %d, %s, %s, %d, %d, %s, %s, %s}," % (
+        out.append("    {%s, OEV_%s, %s, %d, %s, %s, %d, %s, %s, %s}," % (
             slot_c(r["pre"]), r["ev"], ctx, r["prefix"],
-            slot_c(r["post"]), STATUS_C[r["status"]], r["fires"], r["notify"],
+            slot_c(r["post"]), STATUS_C[r["status"]], r["fires"],
             UPD[r["retryUpd"]], UPD[r["stableUpd"]], UPD[r["retriesUpd"]]))
     out.append("};")
 

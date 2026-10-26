@@ -120,7 +120,7 @@ Last verified (TLC 2.19, CBMC 5.95.1):
   illegal and rejected by `path_invariant_check()`; canary OK (the
   policy-constant check passes silently)
 - CBMC `harness` and `harness_null_ctx`: `VERIFICATION SUCCESSFUL`,
-  0 of 1989 properties failed in each, 42 of them `path_invariant_check()`
+  0 of 1981 properties failed in each, 42 of them `path_invariant_check()`
   assertions (about one minute, nearly all of it `harness`;
   `harness_null_ctx` takes about a second)
 
@@ -259,8 +259,7 @@ is visible.
 
 Each row also records:
 
-- the observable calls (`path_fsm_fire_path_event`, the
-  `client_notify_xqc_path_state` app-status);
+- the observable call (`path_fsm_fire_path_event`);
 - the public status of the post-state (`status`), the model's `Projection`;
 - an **update class** per timer and counter: KEEP / ZERO / NOW / ARM
   (`now + backoff`) / INC.
@@ -603,7 +602,6 @@ path to validate (a black-holed path never does).
   cross-connection collision has no observable effect. `MaxXqcIds` limits
   no action: a run that uses up the ids fails `TypeOK`, which only the
   safety run checks.
-- **State transitions follow a Release build** (see finding 5).
 
 ## Scope
 
@@ -660,13 +658,9 @@ connection in one step (`EnvConnClose`); no checked property is affected
 4. **A new path id is trusted to be nonzero.** `activate_via_xquic_classify`
    forwards xquic's id unchecked (`:2473-2482`); the guarantee is
    `xqc_conn_get_available_path_id`'s (`xqc_conn.c:5519-5542`).
-5. **A Debug build asserts on a close before the TUN is up.** The state
-   transition table has no TUNNEL_READY → RECONNECTING entry
-   (`:315-324`), but `cb_h3_conn_close` moves a reconnecting client there
-   from any live state (`:1442-1446`). So a connection that closes after
-   the address is assigned and before `mqvpn_client_set_tun_active` trips
-   the `client_set_state` assertion (`:511`) in a Debug build; a Release
-   build makes the transition. The model follows the Release behaviour.
+5. **A Debug build asserts on a close before the TUN is up.** Fixed by
+   #416 (`f8810ac1`): the transition table now has TUNNEL_READY →
+   RECONNECTING.
 6. **The tunnel-ready dispatch can mark a re-added primary ACTIVE too
    early.** `cli_connect_ip_on_body` dispatches VALIDATION_OK to the
    primary slot whenever it is attached and VALIDATING (`:2143-2152`); it
@@ -686,17 +680,9 @@ connection in one step (`EnvConnClose`); no checked property is affected
    This is the model's only route to DEGRADED (see
    [Abstractions](#abstractions)). Not fixed here: a check of
    `xqc_path_id == 0` in that condition would close it.
-7. **The FSM's FROZEN mark never reaches xquic.** The FSM notifies xquic
-   from one place, `set_path_state_with_log` (`path_state_machine.c:347`).
-   In the table, only 40 rows notify, all with app_status 3 (FROZEN): an
-   ACTIVE or STANDBY slot moved to DEGRADED by XQUIC_REMOVED, and all with
-   `live = 0` in the post-state. That move happens inside
-   `apply_failure_with_retry_check`, after it clears `xquic_path_live`
-   (`path_state_machine.c:391`), and `client_notify_xqc_path_state` returns
-   early on a slot that is not live (`:460`). So the FROZEN mark is dead in
-   practice. No FSM transition produces app_status 1 or 2; the model's
-   `G15` keeps them only as the structure of `g_p15_xqc_app_status_for`.
-   Not fixed here.
+7. **The FSM's FROZEN mark never reached xquic.** Removed: the FSM no
+   longer notifies xquic. The mark was sent after xquic had already
+   dropped the path, and draft-21 §3.3 has no "frozen" wire status.
 
 ## Sensitivity checks
 

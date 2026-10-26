@@ -758,7 +758,7 @@ def build(g, require=True):
 
 # The spec table's classes whose key values it enumerates outright. Those the
 # model never reaches are listed in the header (DeliverRemoval from STANDBY
-# needs a removal of an xquic-ACTIVE path, which PR C's EnvXqcRemoveActive adds).
+# is a spec-table class this model does not reach).
 SPEC_ENUMERATED = (
     ["DeliverRemoval:state=" + x for x in ("Validating", "Active", "Standby", "ClosedDropped")]
     + ["EnvRetryFire:state=%s,result=%s,capped=%d" % (st, r, cap)

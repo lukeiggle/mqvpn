@@ -91,6 +91,13 @@ test_now_us(void)
     return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
 }
 
+/* The probe is a test client, not the system under test: it runs without
+ * the stream backlog cap mqvpn_build_conn_settings sets
+ * (max_stream_unsent_packets), which also holds back a FIN-only write,
+ * except in the test of that cap itself, which sets this before
+ * harness_start and resets it after. */
+static int g_probe_keep_unsent_cap = 0;
+
 /* Counts inner-IP packets the server forwarded out of the tunnel — the
  * observable the tunnel-survival regression test asserts on. */
 static int g_tun_output_count = 0;
@@ -803,6 +810,7 @@ harness_start(harness_t *h, const char *protocol, size_t protocol_len, int auto_
             .init_max_path_id = 0,
         };
         mqvpn_build_conn_settings(&cs_in, &cs);
+        if (!g_probe_keep_unsent_cap) cs.max_stream_unsent_packets = 0;
 
         xqc_conn_ssl_config_t ssl_cfg;
         memset(&ssl_cfg, 0, sizeof(ssl_cfg));
@@ -940,6 +948,9 @@ static int
 probe_send_fin_retry(harness_t *h, probe_conn_t *p, int iter_budget)
 {
     for (int i = 0; i < iter_budget; i++) {
+        /* A request the server has already closed must not be written to:
+         * xquic frees its transport stream at the close notify. */
+        if (p->request_closed || p->closing_notified) return -1;
         ssize_t sent = xqc_h3_request_send_body(p->req, NULL, 0, 1);
         if (sent >= 0) return 0;
         if (sent != -XQC_EAGAIN) return -1;
@@ -2281,8 +2292,10 @@ TEST(mqvpn_tcp_uplink_backlog_stops_at_unsent_cap)
     snprintf(path, sizeof(path), "/.well-known/mqvpn/tcp/127.0.0.1/%d/", sink.port);
 
     harness_t h;
+    g_probe_keep_unsent_cap = 1;
     ASSERT_EQ(harness_start(&h, "mqvpn-tcp", 9, /*auto_open=*/0, harness_cfg_allow_127),
               0);
+    g_probe_keep_unsent_cap = 0;
     h.probe.path = path;
     h.probe.raw_capture = 1;
 
